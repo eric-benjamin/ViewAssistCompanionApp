@@ -214,8 +214,7 @@ class CustomWebView @JvmOverloads constructor(
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> requestDisallow = false
         }
 
-        //Prevent scrolling if more than 1 finger is used
-        if (event.pointerCount > 1 || gestureHandled) {
+        if (gestureHandled) {
             return true
         }
 
