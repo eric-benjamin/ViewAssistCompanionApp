@@ -16,8 +16,8 @@ import com.msp1974.vacompanion.jsinterface.WebAppInterface
 import com.msp1974.vacompanion.jsinterface.WebViewJavascriptInterface
 import com.msp1974.vacompanion.settings.PageLoadingStage
 import com.msp1974.vacompanion.device.DeviceManager
-import com.msp1974.vacompanion.device.authentication.AuthenticationException
 import com.msp1974.vacompanion.jsinterface.ExternalAuthCallback
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -136,8 +136,16 @@ class CustomWebView @JvmOverloads constructor(
                     loadUrl(deviceManager.authenticationManager.getExternalAuthUrl())
                 }
             }
-        } catch (ex: AuthenticationException) {
+        } catch (ex: CancellationException) {
+            throw ex
+        } catch (ex: Exception) {
+            // Refresh failed (network drop, HA restarting, revoked token). Report
+            // failure to the frontend so it retries, rather than vending a stale token
             Timber.e("Error authenticating with HA: ${ex.message}")
+            reAuthRequired = true
+            withContext(Dispatchers.Main) {
+                callAuthFailedJS()
+            }
         }
     }
 
@@ -154,6 +162,9 @@ class CustomWebView @JvmOverloads constructor(
             } else {
                 Timber.w("Requested authentication with HA while network was unavailable")
                 reAuthRequired = true
+                // Answer the frontend anyway — an unresolved auth request leaves the
+                // dashboard hung until app restart
+                post { callAuthFailedJS() }
             }
         }
         override fun onRequestRevokeExternalAuth(view: WebView) {
@@ -176,6 +187,10 @@ class CustomWebView @JvmOverloads constructor(
                     "});",
             null
         )
+    }
+
+    private fun callAuthFailedJS() {
+        evaluateJavascript("if (window.externalAuthSetToken) { window.externalAuthSetToken(false); }", null)
     }
 
     val ViewAssistEventHandler = object : ViewAssistCallback {

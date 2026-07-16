@@ -20,11 +20,9 @@ class AuthenticationManager(
 
     suspend fun ensureValidSession(forceRefresh: Boolean = false) {
         if (isExpired() || forceRefresh || config.accessToken == "") {
-            try {
-                refreshSessionWithToken(config.refreshToken)
-            } catch (e: Exception) {
-                Timber.e("Failed to refresh token: ${e.message}")
-            }
+            // Failures must propagate so callers can report auth failure to the
+            // frontend instead of continuing with a stale token
+            refreshSessionWithToken(config.refreshToken)
         }
     }
 
@@ -95,6 +93,11 @@ class AuthenticationManager(
         return url.toString()
     }
 
-    fun isExpired() = (expiresIn() < 0)
+    // Refresh ahead of expiry so a token is never vended with (almost) no life left
+    fun isExpired() = (expiresIn() < EXPIRY_MARGIN_MS)
     fun expiresIn() = config.tokenExpiry.let { config.tokenExpiry - System.currentTimeMillis() }
+
+    companion object {
+        private const val EXPIRY_MARGIN_MS = 5 * 60 * 1000L
+    }
 }
