@@ -373,9 +373,20 @@ class MainActivity : AppCompatActivity(), EventListener, ComponentCallbacks2 {
                     setScreenSettings()
                     webView.setZoomLevel(config.zoomLevel)
                     config.screenOn = screen.isScreenOn()
-                    val url = deviceManager.authenticationManager.getHAUrl()
-                    Timber.d("Satellite started -> loading URL: $url")
-                    webView.loadUrl(url)
+                    // Satellite restarts whenever HA reconnects (e.g. after the device
+                    // dozes and drops the TCP connection) — only load the page if it
+                    // isn't already showing healthy content
+                    val webviewState = viewModel.vacaState.value.webViewPageLoadingStage
+                    if (webviewState == PageLoadingStage.NOT_STARTED ||
+                        webviewState == PageLoadingStage.ERROR ||
+                        webviewState == PageLoadingStage.AUTH_FAILED ||
+                        webviewState == PageLoadingStage.AUTH_REQUIRED) {
+                        val url = deviceManager.authenticationManager.getHAUrl()
+                        Timber.d("Satellite started -> loading URL: $url")
+                        webView.loadUrl(url)
+                    } else {
+                        Timber.d("Satellite started -> page healthy ($webviewState), not reloading")
+                    }
                 }
                 BroadcastSender.SATELLITE_CLIENT_UPDATED -> {
                     val webviewState = viewModel.vacaState.value.webViewPageLoadingStage
