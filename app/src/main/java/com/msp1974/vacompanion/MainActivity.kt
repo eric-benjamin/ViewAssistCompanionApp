@@ -506,6 +506,12 @@ class MainActivity : AppCompatActivity(), EventListener, ComponentCallbacks2 {
             Timber.e("Error destroying MainActivity: ${e.message}")
         } finally {
             super.onDestroy()
+            // The process outlives the activity (foreground service), so a WebView
+            // left undestroyed leaks its renderer — holding the camera and keeping
+            // its WebRTC publish open as a zombie until the process dies
+            if (this::webView.isInitialized) {
+                webView.destroy()
+            }
         }
     }
 
