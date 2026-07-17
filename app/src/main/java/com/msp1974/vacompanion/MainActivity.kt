@@ -503,6 +503,12 @@ class MainActivity : AppCompatActivity(), EventListener, ComponentCallbacks2 {
         LocalBroadcastManager.getInstance(this).unregisterReceiver(satelliteBroadcastReceiver)
         unregisterReceiver(satelliteBroadcastReceiver)
         super.onDestroy()
+        // The process outlives the activity (foreground service), so a WebView
+        // left undestroyed leaks its renderer — holding the camera and keeping
+        // its WebRTC publish open as a zombie until the process dies
+        if (this::webView.isInitialized) {
+            webView.destroy()
+        }
     }
 
     override fun dispatchTouchEvent(ev: MotionEvent?): Boolean {
