@@ -280,6 +280,9 @@ class MainActivity : AppCompatActivity(), EventListener, ComponentCallbacks2 {
         webViewClient = CustomWebViewClient(viewModel)
         webView = CustomWebView.getView(this)
         webView.initialise(deviceManager, webViewClient)
+        // The page state singleton outlives the activity, but this WebView is
+        // brand new and blank — reset so satellite (re)starts know to load
+        deviceManager.updateWebViewPageLoadingStage(PageLoadingStage.NOT_STARTED)
         webView.layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
