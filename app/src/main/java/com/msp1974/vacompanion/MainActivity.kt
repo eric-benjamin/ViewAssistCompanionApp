@@ -674,12 +674,21 @@ class MainActivity : AppCompatActivity(), EventListener, ComponentCallbacks2 {
             AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_NO)
         }
 
-        // Set device dark mode
-        val uiModeManager = getSystemService(UI_MODE_SERVICE) as UiModeManager
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            uiModeManager.setApplicationNightMode(if (isDark) UiModeManager.MODE_NIGHT_YES else UiModeManager.MODE_NIGHT_NO)
-        } else {
-            uiModeManager.nightMode = if (isDark) UiModeManager.MODE_NIGHT_YES else UiModeManager.MODE_NIGHT_NO
+        // Set device dark mode. Best-effort only: when this app is the device's
+        // HOME app, setApplicationNightMode can throw IllegalStateException from
+        // the window manager ("Can't change activity type once set" — the stored
+        // per-app config still carries activityType=standard). The call is purely
+        // cosmetic next to the in-app theme above and the webview darkening
+        // below, which cover everything visible — never crash for it.
+        try {
+            val uiModeManager = getSystemService(UI_MODE_SERVICE) as UiModeManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                uiModeManager.setApplicationNightMode(if (isDark) UiModeManager.MODE_NIGHT_YES else UiModeManager.MODE_NIGHT_NO)
+            } else {
+                uiModeManager.nightMode = if (isDark) UiModeManager.MODE_NIGHT_YES else UiModeManager.MODE_NIGHT_NO
+            }
+        } catch (e: Exception) {
+            log.w("Could not set application night mode: $e")
         }
 
         webView.refreshDarkMode(isDark)
