@@ -19,7 +19,10 @@ class AudioPipelineRecorder(private val context: Context) {
         // with the threshold lowered deliberately, triggers outrun any sane
         // collection cadence and 15 clips are overwritten within the hour.
         // ~4s of 16kHz mono PCM = 128KB per clip, so this caps the cache at ~38MB.
-        private const val MAX_RECORDINGS = 300
+        // ~125 KB per 4 s clip, so this caps the harvest at roughly 1 GB. Sized for
+        // a deliberate false-positive run with the threshold dropped to ~5.0, where
+        // every clip is a labelled negative that cannot be re-collected.
+        private const val MAX_RECORDINGS = 8000
         private const val SAMPLE_RATE = 16000
         private const val SUB_DIR = "audioLogs"
 
@@ -110,7 +113,10 @@ class AudioPipelineRecorder(private val context: Context) {
             pos += chunk.size
         }
         requestAudioData.clear()
-        val dir = File(context.cacheDir, SUB_DIR)
+        // filesDir, NOT cacheDir: Android's storage-pressure cleaner empties the
+        // cache dir first, and at harvest scale this directory is the largest thing
+        // in it - the system would silently delete the recordings we are collecting.
+        val dir = File(context.filesDir, SUB_DIR)
         if (!dir.exists()) {
             dir.mkdirs()
         }
