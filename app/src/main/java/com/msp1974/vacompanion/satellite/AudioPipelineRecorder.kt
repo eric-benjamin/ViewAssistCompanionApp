@@ -15,7 +15,11 @@ class AudioPipelineRecorder(private val context: Context) {
     companion object {
         private const val PRE_RECORD_SECONDS = 2
         private const val POST_RECORD_SECONDS = 2
-        private const val MAX_RECORDINGS = 15 // Aligned with audio log entries
+        // Deep enough to harvest false activations as wake word training data:
+        // with the threshold lowered deliberately, triggers outrun any sane
+        // collection cadence and 15 clips are overwritten within the hour.
+        // ~4s of 16kHz mono PCM = 128KB per clip, so this caps the cache at ~38MB.
+        private const val MAX_RECORDINGS = 300
         private const val SAMPLE_RATE = 16000
         private const val SUB_DIR = "audioLogs"
 
@@ -122,12 +126,13 @@ class AudioPipelineRecorder(private val context: Context) {
 
             val info = RecordingInfo(currentEventId, file)
 
-            // Cleanup old recordings
+            // Cleanup old recordings, taking each one's metadata sidecar with it
             dir.listFiles { f -> f.name.startsWith("ww_rec_") && f.name.endsWith(".pcm") }
                 ?.sortedBy { it.lastModified() }
                 ?.let { files ->
                     if (files.size > MAX_RECORDINGS) {
                         files.take(files.size - MAX_RECORDINGS).forEach { oldFile ->
+                            File(dir, oldFile.name.removeSuffix(".pcm") + ".json").delete()
                             if (oldFile.delete()) {
                                 Timber.d("Deleted old recording: ${oldFile.name}")
                             }
