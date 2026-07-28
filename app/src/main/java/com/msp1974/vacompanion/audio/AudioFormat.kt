@@ -30,7 +30,22 @@ object VACAAudioFormat {
     /** Samples per 10 ms frame (used by WebRTC APM). */
     const val FRAME_SIZE_10MS = SAMPLE_RATE_HZ / 100  // 160
 
-    const val DEFAULT_AUDIO_SOURCE = MediaRecorder.AudioSource.VOICE_COMMUNICATION
+    /**
+     * VOICE_RECOGNITION, not VOICE_COMMUNICATION (2026-07-28).
+     *
+     * VOICE_COMMUNICATION is the telephony source: the platform is entitled to
+     * apply its own AEC/NS/AGC tuned for two-way calls, and on the ThinkSmart
+     * View it selects the plain `handset-mic` path. VOICE_RECOGNITION is the
+     * source Android specifies as unprocessed and tuned for ASR - which is what
+     * a wake word engine and an STT stream actually want.
+     *
+     * On this device it is also the family that can reach the dual-mic endfire
+     * paths (`voice-rec-dmic-ef`) that exist in /vendor/etc/mixer_paths_mtp.xml
+     * but are unreachable from the voice-communication branch. Endfire is a
+     * directional pickup with a null - different from, not redundant with, the
+     * two DMICs this build already sums into mono.
+     */
+    const val DEFAULT_AUDIO_SOURCE = MediaRecorder.AudioSource.VOICE_RECOGNITION
     const val FALLBACK_AUDIO_SOURCE = MediaRecorder.AudioSource.MIC
 
     const val DEFAULT_BUFFER_SIZE_IN_SHORTS = 1280
