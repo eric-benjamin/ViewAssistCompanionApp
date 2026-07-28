@@ -18,6 +18,7 @@ import com.msp1974.vacompanion.settings.APPConfig
 import timber.log.Timber
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.pow
 
 class   MicrophoneInput (
     val config: APPConfig,
@@ -114,6 +115,15 @@ class   MicrophoneInput (
             if (applyEnhancement && (audioEnhancer.agcEnabled || audioEnhancer.noiseSuppressionEnabled)) {
                 audioEnhancer.setMicGainDb(config.micGain.toFloat())
                 return audioEnhancer.processFrame(frame)
+            }
+            // With the software enhancer off (see setupAudioEffects), mic_gain is a
+            // plain dB trim: -10..+10 dB, 0 = raw passthrough, nothing touches the
+            // samples. This is the path Eric's ear signed off on.
+            if (applyEnhancement && config.micGain != 0) {
+                val gain = 10.0.pow(config.micGain / 20.0).toFloat()
+                for (i in frame.indices) {
+                    frame[i] = (frame[i] * gain).toInt().coerceIn(-32768, 32767).toShort()
+                }
             }
             return frame
         } else if (readCount < 0) {
@@ -253,12 +263,25 @@ class   MicrophoneInput (
             }
         }
 
-        // Use the software equivalent only for whichever effect(s) this device
-        // doesn't actually provide in hardware - not an all-or-nothing fallback.
         hasHardwareAgc = agc?.enabled == true
         hasHardwareNoiseSuppressor = ns?.enabled == true
-        audioEnhancer.agcEnabled = attachAgc && !hasHardwareAgc
-        audioEnhancer.noiseSuppressionEnabled = attachNs && !hasHardwareNoiseSuppressor
+
+        // SOFTWARE ENHANCER OFF IN THIS HOUSE (2026-07-28).
+        //
+        // Upstream enables its software AGC + spectral noise suppressor wherever
+        // the platform effects are missing. On the ThinkSmart View (LineageOS
+        // 15.1) neither platform effect attaches, so both ran - and the result was
+        // audibly worse than raw: distorted, with suppression artifacts, unable to
+        // hear Eric at normal speaking distance. Rejected on his ear, which is the
+        // acceptance test here.
+        //
+        // The spectral suppressor is the prime suspect for the artifacts (FFT
+        // gain-masking produces musical noise on speech), with the AGC boosting
+        // room tone toward its -18 dBFS target between words. Leaving them off
+        // restores the raw capture path that was verified good on this hardware;
+        // mic_gain goes back to being a plain dB trim (see readShort).
+        audioEnhancer.agcEnabled = false
+        audioEnhancer.noiseSuppressionEnabled = false
         audioEnhancer.reset()
 
         Timber.d(
