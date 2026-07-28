@@ -74,7 +74,13 @@ class   MicrophoneInput (
         }
     }
 
-    private val bufferSize =
+    // Stereo capture feeds Fluence both DMICs so it can beamform; everything
+    // downstream still gets mono because readShort downmixes on the way out.
+    // Falls back to mono if the device refuses to open a stereo record.
+    private var activeChannelConfig = channelConfig
+    private val isStereoCapture get() = activeChannelConfig == android.media.AudioFormat.CHANNEL_IN_STEREO
+
+    private var bufferSize =
         AudioRecord.getMinBufferSize(sampleRateInHz, channelConfig, audioFormat)
 
     val isRecording
@@ -106,11 +112,20 @@ class   MicrophoneInput (
     }
 
     fun readShort(bufferSize: Int = VACAAudioFormat.DEFAULT_BUFFER_SIZE_IN_SHORTS, applyEnhancement: Boolean = true): ShortArray {
-        val audioBuffer = ShortArray(bufferSize)
+        // Callers ask for a count of MONO samples. On a stereo record that means
+        // reading twice as many interleaved samples and folding them back down,
+        // so the contract with every consumer is unchanged.
+        val stereo = isStereoCapture
+        val audioBuffer = ShortArray(if (stereo) bufferSize * 2 else bufferSize)
         val audioRecord = this.audioRecord ?: error("Microphone not started")
-        val readCount = audioRecord.read(audioBuffer, 0, audioBuffer.size)
+        var readCount = audioRecord.read(audioBuffer, 0, audioBuffer.size)
+        if (stereo && readCount > 0) readCount -= readCount % 2   // whole frames only
         if (readCount > 0) {
-            val frame = audioBuffer.copyOfRange(0, readCount)
+            val frame = if (stereo) {
+                downmixToMono(audioBuffer, readCount)
+            } else {
+                audioBuffer.copyOfRange(0, readCount)
+            }
             if (applyEnhancement && (audioEnhancer.agcEnabled || audioEnhancer.noiseSuppressionEnabled)) {
                 audioEnhancer.setMicGainDb(config.micGain.toFloat())
                 return audioEnhancer.processFrame(frame)
@@ -133,20 +148,50 @@ class   MicrophoneInput (
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     private fun createAudioRecord(): AudioRecord {
-        val audioRecord = AudioRecord(
-            audioSource,
-            sampleRateInHz,
-            channelConfig,
-            audioFormat,
-            bufferSize * 2
-        )
-        check(audioRecord.state == AudioRecord.STATE_INITIALIZED) {
-            "Failed to initialize AudioRecord"
+        // Try the requested config first, then mono. A device that won't open a
+        // stereo record must not take the satellite's microphone down with it.
+        val configs = if (isStereoCapture) {
+            listOf(channelConfig, VACAAudioFormat.CHANNELS_MONO)
+        } else {
+            listOf(channelConfig)
         }
 
-        updatePreferredDevice(audioRecord)
+        for (config in configs) {
+            val size = AudioRecord.getMinBufferSize(sampleRateInHz, config, audioFormat)
+            if (size <= 0) {
+                Timber.w("Channel config $config unsupported at ${sampleRateInHz}Hz")
+                continue
+            }
+            val record = try {
+                AudioRecord(audioSource, sampleRateInHz, config, audioFormat, size * 2)
+            } catch (e: Exception) {
+                Timber.w("AudioRecord failed for channel config $config: ${e.message}")
+                continue
+            }
+            if (record.state != AudioRecord.STATE_INITIALIZED) {
+                record.release()
+                Timber.w("AudioRecord not initialised for channel config $config")
+                continue
+            }
 
-        return audioRecord
+            activeChannelConfig = config
+            bufferSize = size
+            Timber.d("Capturing ${if (isStereoCapture) "STEREO (downmixed to mono)" else "MONO"}")
+
+            updatePreferredDevice(record)
+            return record
+        }
+
+        error("Failed to initialize AudioRecord")
+    }
+
+    /** Average the interleaved pair down to one mono sample. */
+    private fun downmixToMono(interleaved: ShortArray, sampleCount: Int): ShortArray {
+        val out = ShortArray(sampleCount / 2)
+        for (i in out.indices) {
+            out[i] = ((interleaved[i * 2] + interleaved[i * 2 + 1]) / 2).toShort()
+        }
+        return out
     }
 
     private fun registerDeviceCallback() {

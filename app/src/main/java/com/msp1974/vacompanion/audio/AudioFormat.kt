@@ -15,8 +15,20 @@ object VACAAudioFormat {
     /** Sample rate in Hz. WebRTC APM requires 16 kHz. */
     const val SAMPLE_RATE_HZ = 16000
 
-    /** Number of audio channels (mono). */
-    const val CHANNELS = 1
+    /**
+     * Capture channel config (2026-07-28).
+     *
+     * STEREO, so the Qualcomm Fluence DSP is handed both DMICs and can actually
+     * beamform. With a mono client it runs single-mic no matter which snd_device
+     * the HAL routes - the `voice-rec-dmic-ef-fluence` path is necessary but not
+     * sufficient. MicrophoneInput downmixes to mono immediately after capture, so
+     * every consumer downstream still sees the same mono 16 kHz stream it always
+     * did, and falls back to mono capture if the device rejects stereo.
+     */
+    @JvmField val CHANNELS = AudioFormat.CHANNEL_IN_STEREO
+
+    /** Fallback capture channel config when the device won't open stereo. */
+    @JvmField val CHANNELS_MONO = AudioFormat.CHANNEL_IN_MONO
 
     /** Bytes per sample (16-bit PCM = 2). */
     const val BYTES_PER_SAMPLE = 2
