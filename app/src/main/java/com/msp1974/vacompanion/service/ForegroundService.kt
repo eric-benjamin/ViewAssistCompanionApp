@@ -10,6 +10,7 @@ import android.content.pm.ResolveInfo
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -41,6 +42,11 @@ class VAForegroundService @Inject constructor() : LifecycleService(), EventListe
 
     private lateinit var firebase: FirebaseManager
     private var keyguardLock: KeyguardManager.KeyguardLock? = null
+    // The Wyoming TCP server must stay serviceable while the device dozes.
+    // With the microphone muted no AudioIn wake lock exists, Doze suspends the
+    // process, and HA's satellite connection dies on every idle period — held
+    // for the service's lifetime, released in onDestroy.
+    private var cpuWakeLock: PowerManager.WakeLock? = null
     private var watchdogTimer: Timer = Timer()
 
     private var backgroundTask:  BackgroundTaskController? = null
@@ -88,6 +94,16 @@ class VAForegroundService @Inject constructor() : LifecycleService(), EventListe
             Actions.START.toString() -> {
                 // Permissions are only requested during onboarding, so the service always
                 // starts; foregroundServiceTypes() only declares the types that are granted.
+                if (cpuWakeLock == null) {
+                    val pm = getSystemService(POWER_SERVICE) as PowerManager
+                    cpuWakeLock = pm.newWakeLock(
+                        PowerManager.PARTIAL_WAKE_LOCK,
+                        "vacompanion:SatelliteServer"
+                    ).apply { setReferenceCounted(false) }
+                }
+                if (cpuWakeLock?.isHeld != true) {
+                    cpuWakeLock?.acquire()
+                }
                 val notification =
                     NotificationCompat.Builder(this, "VACAForegroundServiceChannelId")
                         .setSmallIcon(R.mipmap.ic_launcher)
@@ -221,6 +237,9 @@ class VAForegroundService @Inject constructor() : LifecycleService(), EventListe
         super.onDestroy()
         Timber.i("Stopping Background Service")
         config.eventBroadcaster.removeListener(this)
+        if (cpuWakeLock?.isHeld == true) {
+            cpuWakeLock?.release()
+        }
         watchdogTimer.cancel()
         backgroundTask?.shutdown()
 
