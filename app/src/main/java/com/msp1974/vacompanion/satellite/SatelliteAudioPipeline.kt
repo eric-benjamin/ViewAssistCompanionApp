@@ -1,7 +1,6 @@
 package com.msp1974.vacompanion.satellite
 
 import android.content.Context
-import com.msp1974.vacompanion.audio.AudioDSP
 import com.msp1974.vacompanion.satellite.Satellite.Companion.isoNow
 import com.msp1974.vacompanion.settings.APPConfig
 import com.msp1974.vacompanion.utils.Event
@@ -105,8 +104,6 @@ abstract class SatelliteAudioPipeline(
             }
         }
 
-    var silenceAudioBefore: Long = 0L
-
     private val isContinuation
         get() = pipelineStartMode == PipelineStartMode.CONTINUE_CONVERSATION
 
@@ -166,7 +163,6 @@ abstract class SatelliteAudioPipeline(
                         sendMessage(buildRunPipelineMessage(pipelineStartMode))
                     }
                     PipelineStartMode.CONTINUE_CONVERSATION -> {
-                        silenceAudioBefore = 1L
                         sendMessage(buildRunPipelineMessage(pipelineStartMode))
                     }
                     PipelineStartMode.START_STREAM_TTS -> {
@@ -174,7 +170,6 @@ abstract class SatelliteAudioPipeline(
                     }
 
                     PipelineStartMode.REQUESTED_BY_SERVER -> {
-                        silenceAudioBefore = 1L
                         shouldContinueConversation = false
                     }
                 }
@@ -303,17 +298,16 @@ abstract class SatelliteAudioPipeline(
         val job = scope.launch(Dispatchers.Default) {
             Timber.d("AudioOut handler started.")
             try {
+                // Everything that arrives here is speech. The wake sound never
+                // reaches this queue: Satellite.playWakeWordDetectionSound() holds the
+                // pipeline shut until the sound has finished, so there is nothing to
+                // filter out here. The attenuate-the-first-N-milliseconds guard this
+                // replaces did not silence the sound (it dropped it 20 dB, which
+                // transcribes fine) and un-guarded its last 100 ms, which is where the
+                // tail of the cue lived.
                 while (true) {
-                    if (silenceAudioBefore > 0L) {
-                        val audio = audioOutQueue.receive()
-                        var audioByteArray = audio.audio.toByteArray()
-                        if (audio.timestamp < silenceAudioBefore - 100) {
-                            audioByteArray = AudioDSP().reduceVolume(audioByteArray, 0.1F)
-                        }
-                        val packet = buildAudioPacketMessage(audioByteArray)
-                        sendMessage(packet)
-                    }
-                    yield()
+                    val audio = audioOutQueue.receive()
+                    sendMessage(buildAudioPacketMessage(audio.audio.toByteArray()))
                 }
             } finally {
                 withContext(NonCancellable) {

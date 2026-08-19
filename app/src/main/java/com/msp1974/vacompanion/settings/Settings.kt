@@ -127,6 +127,18 @@ class APPConfig @Inject constructor(val context: Context) {
         onValueChangedListener(property, oldValue, newValue)
     }
 
+    /**
+     * Extra milliseconds to keep the microphone shut after the wake sound, on top of
+     * the sound's own measured length and the device's output latency.
+     *
+     * Trim on top of a derived figure, never a substitute for it: a longer wake sound
+     * must not need this touching. Raise it only if a device holds audio in the output
+     * path for longer than [SoundEffectsPlayer.outputLatencyMs] allows for.
+     */
+    var wakeSoundGuardMs: Int by Delegates.observable(DEFAULT_WAKE_SOUND_GUARD_MS) { property, oldValue, newValue ->
+        onValueChangedListener(property, oldValue, newValue)
+    }
+
     var continueConversation: Boolean by Delegates.observable(false) { property, oldValue, newValue ->
         onValueChangedListener(property, oldValue, newValue)
     }
@@ -330,6 +342,7 @@ class APPConfig @Inject constructor(val context: Context) {
         settings["wake_word_sound"]?.jsonPrimitive?.contentOrNull?.let { wakeWordSound = it }
         settings["alarm_sound"]?.jsonPrimitive?.contentOrNull?.let { alarmSound = it }
         settings["wake_word_threshold"]?.jsonPrimitive?.floatOrNull?.let { wakeWordThreshold = (it / 10).round(2) }
+        settings["wake_sound_guard"]?.jsonPrimitive?.intOrNull?.let { wakeSoundGuardMs = it }
         settings["raw_proximity_threshold"]?.jsonPrimitive?.intOrNull?.let { rawProximitySensorThreshold = it }
         settings["notification_volume"]?.jsonPrimitive?.floatOrNull?.let { notificationVolume = it.toInt() }
         settings["music_volume"]?.jsonPrimitive?.floatOrNull?.let { musicVolume = it.toInt() }
@@ -411,6 +424,7 @@ class APPConfig @Inject constructor(val context: Context) {
         const val DEFAULT_WAKE_WORD_SOUND = "none"
         const val DEFAULT_ALARM_SOUND = "alarm_sound"
         const val DEFAULT_WAKE_WORD_THRESHOLD = 0.6f
+        const val DEFAULT_WAKE_SOUND_GUARD_MS = 0
         const val DEFAULT_NOTIFICATION_VOLUME = 10
         const val DEFAULT_MUSIC_VOLUME = 10
         const val DEFAULT_SCREEN_BRIGHTNESS = 0.5f
