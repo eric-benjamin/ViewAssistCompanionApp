@@ -113,6 +113,9 @@ abstract class Satellite(var context: Context, val deviceManager: DeviceManager,
     private val microphone = MicrophoneAudioStream(context, deviceManager, scope)
 
     private var soundEffectFinishTime: Long = 0
+
+    /** Active while a wake cue is playing and the microphone is being held shut. */
+    private var wakeGuardJob: Job? = null
     private var currentWakeWordSoundUri: android.net.Uri? = null
 
     private var _satelliteState = MutableStateFlow(SatelliteState.STOPPED)
@@ -496,6 +499,14 @@ abstract class Satellite(var context: Context, val deviceManager: DeviceManager,
             BroadcastSender.sendBroadcast(context, BroadcastSender.TOAST_MESSAGE, toastMessage)
             return
         }
+        if (wakeGuardJob?.isActive == true) {
+            // The cue for the previous detection is still playing, so the pipeline
+            // does not exist yet and the checks below would read that as "start a new
+            // one" and cue a second time. This is the same wake.
+            Timber.d("Wake sound still playing, ignoring repeat detection")
+            return
+        }
+
         soundEffectFinishTime = 0L
         var startNewPipeline = audioPipeline == null || audioPipeline?.pipelineStage == PipelineStage.ENDED
 
@@ -542,42 +553,55 @@ abstract class Satellite(var context: Context, val deviceManager: DeviceManager,
                 config.screenSaver = false
             }
             audioLogManager.onWakeWordDetected(detection.timestamp, detection.wakeWord, detection.score)
-            startAudioPipeline(PipelineStartMode.WAKE_WORD_DETECTED, detection.timestamp)
-            playWakeWordDetectionSound()
+            playWakeWordDetectionSound(detection.timestamp)
         }
     }
 
-    suspend fun playWakeWordDetectionSound() {
-        if (config.wakeWordSound != "none") {
+    /**
+     * Plays the wake cue and opens the microphone only once it has finished.
+     *
+     * The pipeline used to start first and the cue was played into a live microphone,
+     * so every utterance reached STT with the cue on the front of it - "Yes, sir Bring
+     * up the planner, please". Starting the pipeline afterwards costs nothing: nobody
+     * speaks over the cue, that is what the cue is for, and Home Assistant is ready
+     * for audio the moment the pipeline opens (measured on the live pipeline:
+     * run-start to stt-start is 0 ms), so there is no handshake to overlap. Audio that
+     * is never captured cannot leak, which matters here more than anywhere, because
+     * the thing being replaced is a mute that did not mute.
+     *
+     * The wait is derived rather than tuned. It is the cue's own length, read off the
+     * file when the cue was preloaded, plus the time the last sample needs to reach the
+     * speaker. Swap the cue for a longer one and the guard follows it with no
+     * configuration change.
+     *
+     * The cue is played from a launched job so the wake word engine's audio loop, which
+     * calls this, is never held up by the wait.
+     */
+    fun playWakeWordDetectionSound(eventId: Long = System.currentTimeMillis()) {
+        val soundUri = if (config.wakeWordSound != "none") {
+            currentWakeWordSoundUri ?: resolveWakeSoundUri(config.wakeWordSound)
+        } else {
+            null
+        }
+
+        if (soundUri == null) {
+            startAudioPipeline(PipelineStartMode.WAKE_WORD_DETECTED, eventId)
+            return
+        }
+
+        wakeGuardJob = scope.launch {
             try {
-                val soundUri = currentWakeWordSoundUri ?: resolveWakeSoundUri(config.wakeWordSound)
-
-                if (soundUri != null) {
-                    // Gate the mic before the chime starts, not after - many devices have no
-                    // hardware AEC, so without this the chime's acoustic leak-back would pollute
-                    // the AGC's envelope and get forwarded to HA. The capped duration is a safety
-                    // net in case ENDED is never observed below.
-                    // MicrophoneInput.suppressMicFor(NOTIFICATION_SOUND_MAX_SUPPRESSION_MS)
-                    mediaManager.soundPlayer.play(soundUri)
-                }
-
-                Timber.i("Started wake word sound")
-                scope.launch {
-                    // The player may already be sitting at STATE_ENDED from a previous play of
-                    // this same (cached) sound, so wait for it to actually leave ENDED first -
-                    // confirming this playback has genuinely (re)started - before waiting for it
-                    // to end again. Without this, a stale ENDED reading here would shrink the
-                    // mic gate down to the trailing margin before the chime has even played.
-                    mediaManager.soundPlayer.state.first { it != Player.STATE_ENDED }
-                    mediaManager.soundPlayer.state.first { it == Player.STATE_ENDED }
-                    // Now that actual playback end is known, shrink the gate down to just the
-                    // acoustic/capture-latency margin instead of the full safety-net duration.
-                    // MicrophoneInput.suppressMicFor(NOTIFICATION_SOUND_TRAILING_MARGIN_MS)
-                    Timber.i("Ended wake word sound")
-                }
+                val guardMs = mediaManager.soundPlayer.durationMs(soundUri) +
+                        mediaManager.soundPlayer.outputLatencyMs +
+                        config.wakeSoundGuardMs
+                mediaManager.soundPlayer.play(soundUri)
+                Timber.i("Started wake word sound, holding the mic shut for ${guardMs}ms")
+                delay(guardMs.milliseconds)
+                Timber.i("Ended wake word sound")
             } catch (e: Exception) {
                 Timber.e("Error playing wake word sound: ${e.message.toString()}")
             }
+            startAudioPipeline(PipelineStartMode.WAKE_WORD_DETECTED, eventId)
         }
     }
 
