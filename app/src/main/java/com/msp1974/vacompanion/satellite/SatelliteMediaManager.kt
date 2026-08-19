@@ -73,8 +73,21 @@ class SatelliteMediaManager(val context: Context, val config: APPConfig) {
         val voiceService = Intent(context, VoicePlayerService::class.java)
 
         fun start() {
-            if (!isRunning()) {
+            // Unconditional. startService is idempotent, and guarding on
+            // isRunning() skips the start whenever a previous stopService is
+            // still pending, leaving the caller holding a service that is about
+            // to be destroyed underneath it.
+            //
+            // Guarded like stop(). This is the first statement of the satellite's
+            // audio warm-up, so a throw here would take out the sensors, the wake
+            // word engine and the event handler with it while the satellite still
+            // reports RUNNING: a device that looks healthy and is deaf. Callers
+            // already tolerate the service not coming up — they wait on
+            // isRunning() and give up quietly.
+            try {
                 context.startService(voiceService)
+            } catch (e: Exception) {
+                Timber.e("Could not start voice player service: ${e.message}")
             }
         }
 

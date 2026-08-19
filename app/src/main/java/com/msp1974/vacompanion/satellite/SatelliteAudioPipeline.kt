@@ -152,7 +152,7 @@ abstract class SatelliteAudioPipeline(
             try {
                 pipelineStage = PipelineStage.STARTING
 
-                mediaManager.voicePlayer.start()
+                armAudioFocus()
                 scope.launch { audioInMessageHandler() }
                 scope.launch { audioOutHandler() }
                 watchDogTimer()
@@ -192,7 +192,13 @@ abstract class SatelliteAudioPipeline(
                         else -> { "Pipeline ended for unknown reason" }
                     }
                     Timber.d("$msg [$pipelineId]")
-                    mediaManager.voicePlayer.stop()
+                    // Release the track and the focus, but leave the service
+                    // running. It is owned by the satellite: stopping it here
+                    // destroyed it asynchronously, and a pipeline created in the
+                    // gap between stopService and onDestroy would find a live
+                    // instance, skip starting its own, and then lose the service.
+                    mediaManager.voicePlayer.forceStop()
+                    mediaManager.voicePlayer.abandonAudioFocus()
                     pipelineStage = PipelineStage.ENDED
                     onFinish(result, shouldContinueConversation)
                 }
@@ -201,6 +207,46 @@ abstract class SatelliteAudioPipeline(
         result = pipelineRunning.await()
         job.cancel()
         Timber.d("Pipeline stopped [$pipelineId] -> $result.")
+    }
+
+    /**
+     * Takes audio focus for this interaction, so anything else playing ducks.
+     *
+     * VoiceManager.requestAudioFocus() is `sInstance?.hasAudioFocus?.let { ... }`,
+     * which does nothing at all when the service is not up and is never retried —
+     * the whole interaction then runs at full volume over the music. The service
+     * is satellite-scoped and normally already running, so the common path is the
+     * synchronous one; only the cold-start case (warm-up still blocked on
+     * waitForSettings, or Android reclaimed a START_NOT_STICKY service) waits, and
+     * it waits off to the side. Ducking must never hold up the microphone: the
+     * voice player has no part in listening.
+     */
+    private fun armAudioFocus() {
+        if (mediaManager.voicePlayer.isRunning()) {
+            mediaManager.voicePlayer.requestAudioFocus()
+            return
+        }
+        scope.launch {
+            mediaManager.voicePlayer.start()
+            try {
+                withTimeout(2.seconds) {
+                    while (!mediaManager.voicePlayer.isRunning()) {
+                        delay(50.milliseconds)
+                    }
+                }
+            } catch (_: Exception) {
+                Timber.w("Voice player did not start in time to duck other audio [$pipelineId]")
+                return@launch
+            }
+            if (pipelineStage == PipelineStage.ENDED) return@launch
+            mediaManager.voicePlayer.requestAudioFocus()
+            // The pipeline can end while that request is in flight. Its own
+            // abandon has already run by then, so a grant landing late would duck
+            // the house until the next interaction — clean up after ourselves.
+            if (pipelineStage == PipelineStage.ENDED) {
+                mediaManager.voicePlayer.abandonAudioFocus()
+            }
+        }
     }
 
     fun stop(endReason: PipelineEndReason = PipelineEndReason.FORCE_STOPPED) {
@@ -340,6 +386,13 @@ abstract class SatelliteAudioPipeline(
         val rate = msg.getProp("rate").toInt()
         val width = msg.getProp("width").toInt()
         val channels = msg.getProp("channels").toInt()
+        // The satellite owns the service, but a pipeline can still run before
+        // the satellite's warm-up has started it, or after Android has reclaimed
+        // it. Asking again is idempotent and keeps the self-healing the old
+        // per-pipeline lifetime gave us for free — without it, a service that is
+        // missing at this moment stays missing for the rest of the session and
+        // every reply is silently dropped.
+        mediaManager.voicePlayer.start()
         try {
             withTimeout(1.seconds) {
                 while (!mediaManager.voicePlayer.isRunning()) {

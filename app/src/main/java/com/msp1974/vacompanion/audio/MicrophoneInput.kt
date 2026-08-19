@@ -14,6 +14,7 @@ import androidx.annotation.RequiresPermission
 import com.msp1974.vacompanion.broadcasts.BroadcastSender
 import com.msp1974.vacompanion.device.FunctionClasses
 import com.msp1974.vacompanion.device.UnsupportedFunctionsDevice
+import com.msp1974.vacompanion.gideon.GideonVoiceMeter
 import com.msp1974.vacompanion.settings.APPConfig
 import timber.log.Timber
 import java.nio.ByteBuffer
@@ -129,7 +130,9 @@ class   MicrophoneInput (
             }
             if (applyEnhancement && (audioEnhancer.agcEnabled || audioEnhancer.noiseSuppressionEnabled)) {
                 audioEnhancer.setMicGainDb(config.micGain.toFloat())
-                return audioEnhancer.processFrame(frame)
+                val enhanced = audioEnhancer.processFrame(frame)
+                GideonVoiceMeter.feedMic(enhanced, enhanced.size, sampleRateInHz)
+                return enhanced
             }
             // With the software enhancer off (see setupAudioEffects), mic_gain is a
             // plain dB trim: -10..+10 dB, 0 = raw passthrough, nothing touches the
@@ -140,6 +143,9 @@ class   MicrophoneInput (
                     frame[i] = (frame[i] * gain).toInt().coerceIn(-32768, 32767).toShort()
                 }
             }
+            // Read-only tap for the dashboard meter: this is exactly what the
+            // recognizer is about to receive. See gideon/GideonVoiceMeter.
+            GideonVoiceMeter.feedMic(frame, frame.size, sampleRateInHz)
             return frame
         } else if (readCount < 0) {
             Timber.e("AudioRecord read error: $readCount")

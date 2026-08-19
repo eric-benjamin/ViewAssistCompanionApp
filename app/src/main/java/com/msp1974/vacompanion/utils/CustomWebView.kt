@@ -11,6 +11,7 @@ import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebSettingsCompat.DARK_STRATEGY_PREFER_WEB_THEME_OVER_USER_AGENT_DARKENING
 import androidx.webkit.WebViewFeature
 import com.msp1974.vacompanion.device.sensors.NetworkStatus
+import com.msp1974.vacompanion.gideon.GideonVoiceBridge
 import com.msp1974.vacompanion.jsinterface.ViewAssistCallback
 import com.msp1974.vacompanion.jsinterface.WebAppInterface
 import com.msp1974.vacompanion.jsinterface.WebViewJavascriptInterface
@@ -97,6 +98,11 @@ class CustomWebView @JvmOverloads constructor(
         // Add JS interfaces
         removeJavascriptInterface("Android")
         addJavascriptInterface(androidInterface, "Android")
+
+        // Live audio meter for the house dashboard. Read-only; see
+        // gideon/GideonVoiceMeter. Delete these two lines to remove the feature.
+        removeJavascriptInterface("GideonVoice")
+        addJavascriptInterface(GideonVoiceBridge, "GideonVoice")
 
         if (webViewClient::class == CustomWebViewClient::class) {
             val webViewClientA = webViewClient as CustomWebViewClient
