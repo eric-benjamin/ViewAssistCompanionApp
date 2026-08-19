@@ -12,6 +12,7 @@ import androidx.annotation.RequiresPermission
 import com.msp1974.vacompanion.device.DeviceManager
 import com.msp1974.vacompanion.device.FunctionClasses
 import com.msp1974.vacompanion.device.UnsupportedFunctionsDevice
+import com.msp1974.vacompanion.gideon.GideonVoiceMeter
 import com.msp1974.vacompanion.settings.APPConfig
 import timber.log.Timber
 import kotlin.math.pow
@@ -229,7 +230,11 @@ class MicrophoneInput (
                     }
                 }
                 audioEnhancer.setMicGainDb(micGain.toFloat())
-                return audioEnhancer.processFrame(frame)
+                val out = audioEnhancer.processFrame(frame)
+                // Read-only tap for the dashboard meter: this is exactly what the
+                // recognizer is about to receive. See gideon/GideonVoiceMeter.
+                GideonVoiceMeter.feedMic(out, out.size, sampleRateInHz)
+                return out
             }
             return frame
         }

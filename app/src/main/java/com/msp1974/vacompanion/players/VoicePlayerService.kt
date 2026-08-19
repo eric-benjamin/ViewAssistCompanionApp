@@ -15,6 +15,7 @@ import com.msp1974.vacompanion.device.DeviceManager
 import com.msp1974.vacompanion.utils.Event
 import com.msp1974.vacompanion.utils.EventListener
 import dagger.hilt.android.AndroidEntryPoint
+import com.msp1974.vacompanion.gideon.GideonVoiceMeter
 import timber.log.Timber
 import javax.inject.Inject
 
@@ -62,7 +63,10 @@ class VoicePlayerService : Service(), EventListener {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        requestAudioFocus()
+        // Audio focus belongs to a voice interaction, not to this service. The
+        // service now lives for as long as the satellite does, so requesting
+        // focus here would hold it permanently. SatelliteAudioPipeline requests
+        // and abandons it around each interaction instead.
         return START_NOT_STICKY
     }
 
@@ -103,6 +107,7 @@ class VoicePlayerService : Service(), EventListener {
         try {
             mediaPlayer?.play()
             isReady = true
+            GideonVoiceMeter.ttsStarted(rate, width, channels)
         } catch (e: Exception) {
             Timber.e("Error playing voice audio: $e")
         }
@@ -119,6 +124,15 @@ class VoicePlayerService : Service(), EventListener {
             if (writeResult < 0) {
                 Timber.w("AudioTrack write failed with code $writeResult")
             }
+            // Dashboard meter, read-only. Sampled AFTER the write so the playback
+            // head reflects what has actually been heard — the meter follows the
+            // sound, not the buffer. Guarded separately so a fault here can never
+            // be mistaken for, or interfere with, an audio failure.
+            try {
+                GideonVoiceMeter.feedTts(buffer, buffer.size, mediaPlayer?.playbackHeadPosition ?: 0)
+            } catch (e: Exception) {
+                Timber.w("Voice meter tap failed: ${e.message}")
+            }
         } catch (e: Exception) {
             Timber.e("Error writing voice audio: $e")
         }
@@ -126,7 +140,17 @@ class VoicePlayerService : Service(), EventListener {
 
     fun stop(force: Boolean) {
         Timber.d("Stopping voice audio...")
+        // force = pause+flush, so whatever was still queued is discarded and must
+        // never reach the meter. A graceful stop plays out, so let it drain.
+        GideonVoiceMeter.ttsStopped(force)
         mediaPlayer?.let { track ->
+            // Reset first, unconditionally. The track calls below throw
+            // IllegalStateException on an uninitialised AudioTrack, and this
+            // service now outlives a single utterance — so state left behind by
+            // a throw here would be inherited by the next one.
+            isReady = false
+            isPlaying = false
+            mediaPlayer = null
             try {
                 if (force) {
                     track.pause()

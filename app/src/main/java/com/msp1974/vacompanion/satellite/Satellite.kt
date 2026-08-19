@@ -704,8 +704,23 @@ abstract class Satellite(var context: Context, val deviceManager: DeviceManager,
                 if (reason == PipelineEndReason.END_OF_PIPELINE) {
                     if (continueConversation) {
                         scope.launch {
-                            while (mediaManager.voicePlayer.isRunning()) {
-                                delay(10.milliseconds)
+                            // This barrier used to wait for the previous
+                            // pipeline's voice service to finish being
+                            // destroyed. The service is satellite-scoped now, so
+                            // isRunning() would never go false and this would
+                            // spin forever. What the wait is actually for is not
+                            // re-opening the mic while the reply is still coming
+                            // out of the speaker, so wait on playback — bounded,
+                            // because isPlaying is not guaranteed to be cleared
+                            // on every error path.
+                            try {
+                                withTimeout(2.seconds) {
+                                    while (mediaManager.voicePlayer.isPlaying()) {
+                                        delay(10.milliseconds)
+                                    }
+                                }
+                            } catch (_: Exception) {
+                                Timber.w("Voice audio did not finish before continuing conversation")
                             }
                             startAudioPipeline(PipelineStartMode.CONTINUE_CONVERSATION)
                         }
@@ -946,6 +961,12 @@ abstract class Satellite(var context: Context, val deviceManager: DeviceManager,
     @SuppressLint("DiscouragedApi")
     private suspend fun warmUpAudioResources() {
         withContext(Dispatchers.Main) {
+            // The voice player is a satellite-lifetime resource, started once
+            // here and stopped in SatelliteMediaManager.stopAll(). Starting it
+            // per pipeline meant every pipeline also destroyed it, and the next
+            // pipeline could be created before that destruction completed.
+            mediaManager.voicePlayer.start()
+
             mediaManager.soundPlayer.preload("asset:///other/error.mp3".toUri())
             preloadWakeWordSound()
         }
