@@ -16,6 +16,12 @@ open class WakeWordEngine(val context: Context, val config: APPConfig, val engin
     private var activeStopWords: List<String> = listOf()
     private var engineInstance: WakeWordEngineProvider? = null
 
+    // The requested mute state, held here so it survives the engine being absent.
+    // setMuted can be called before start() has built the engine, or between a
+    // restart tearing one down and the next one coming up; without somewhere to
+    // keep it, such a call was dropped and the microphone stayed live.
+    private var mutedState: Boolean = config.isMuted
+
     private suspend fun get(): WakeWordEngineProvider? {
         Timber.i("Starting $engine wake word engine")
 
@@ -92,8 +98,11 @@ open class WakeWordEngine(val context: Context, val config: APPConfig, val engin
     }
 
     fun setMuted(value: Boolean) {
+        mutedState = value
         if (engineInstance != null) {
             engineInstance!!.setMuted(value)
+        } else {
+            Timber.i("No wake word engine yet, holding muted=$value until it starts")
         }
     }
 
@@ -101,12 +110,15 @@ open class WakeWordEngine(val context: Context, val config: APPConfig, val engin
         if (engineInstance != null) {
             return engineInstance!!.isMuted()
         }
-        return false
+        return mutedState
     }
 
     fun start() = flow {
         engineInstance = get()
         if (engineInstance != null) {
+            // The engine is built from config, which can already be stale by the
+            // time it exists. Apply the state we were last asked for.
+            engineInstance!!.setMuted(mutedState)
             try {
                 engineInstance!!.start()!!.collect {
                     when (it) {

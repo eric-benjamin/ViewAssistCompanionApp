@@ -489,9 +489,13 @@ abstract class Satellite(var context: Context, val deviceManager: DeviceManager,
 
 
     fun muteMicrophone(muted: Boolean) {
-        runCatching {
-            wakeWordHandler?.engine!!.setMuted(muted)
+        val engine = wakeWordHandler?.engine
+        if (engine == null) {
+            Timber.w("No wake word handler to mute; muted=$muted will apply when one starts")
+            return
         }
+        runCatching { engine.setMuted(muted) }
+            .onFailure { Timber.e("Failed to set microphone muted=$muted: $it") }
     }
 
 
