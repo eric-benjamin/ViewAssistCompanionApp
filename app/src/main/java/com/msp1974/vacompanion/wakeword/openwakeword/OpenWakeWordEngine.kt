@@ -52,6 +52,7 @@ class OpenWakeWordEngine(
     private val probabilities = ArrayDeque<Float>(slidingWindowSize)
 
     private val lastScores = mutableMapOf<String, Float>()
+    private val audioDSP = AudioDSP()
 
     /**
      * Flow of wake word detection events.
@@ -162,26 +163,27 @@ class OpenWakeWordEngine(
                 microphoneInput.start()
                 emit(AudioResult.EngineStatus("Started"))
                 while (true) {
-                    val audio = microphoneInput.readFloat()
+                    val audio = microphoneInput.readShort()
                     val frameTimestamp = System.currentTimeMillis()
 
                     if (audio.isNotEmpty()) {
 
                         if (config.diagnosticsEnabled) {
-                            emit(AudioResult.AudioLevel(AudioDSP().audioLevel(audio)))
+                            val normalisedAudio = audioDSP.normaliseAudioBuffer(audio)
+                            emit(AudioResult.AudioLevel(AudioDSP().audioLevel(normalisedAudio)))
                         }
 
                         if (isStreaming || config.recordingWakewordEnabled) {
-                            val a = AudioDSP().floatArrayToByteBuffer(audio)
+                            val audioBytes = AudioDSP().shortArrayToByteBuffer(audio)
                             emit(
                                 AudioResult.Audio(
-                                    ByteString.copyFrom(a),
+                                    ByteString.copyFrom(audioBytes),
                                     timestamp = frameTimestamp
                                 )
                             )
                         }
 
-                        val detections = processAudio(audio, frameTimestamp)
+                        val detections = processAudio(audioDSP.shortArrayTo16BitPCMFloat(audio), frameTimestamp)
                         for (detection in detections) {
                             val lastScore = lastScores[detection.wakeWordId] ?: 0f
                             if (detection.score > 0.1f || lastScore > 0.1f) {

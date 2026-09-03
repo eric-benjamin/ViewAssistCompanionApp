@@ -1,6 +1,8 @@
 package com.msp1974.vacompanion.wakeword.models
 
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonIgnoreUnknownKeys
 import java.nio.ByteBuffer
 
 data class WakeWordWithId(
@@ -9,7 +11,9 @@ data class WakeWordWithId(
     val load: suspend () -> ByteBuffer
 )
 
+@OptIn(ExperimentalSerializationApi::class)
 @Serializable
+@JsonIgnoreUnknownKeys
 data class WakeWord(
     val type: String,
     val wake_word: String,
@@ -21,7 +25,9 @@ data class WakeWord(
     val version: Int = 0,
 )
 
+@OptIn(ExperimentalSerializationApi::class)
 @Serializable
+@JsonIgnoreUnknownKeys
 data class Micro(
     val probability_cutoff: Float,
     val sliding_window_size: Int,

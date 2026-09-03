@@ -33,6 +33,7 @@ class DeviceInfo @Inject constructor(val context: Context) {
             putJsonObject("audio") {
                 put("max_music_volume", features.audio.maxMusicVolume)
                 put("max_notification_volume", features.audio.maxNotificationVolume)
+                put("max_alarm_volume", features.audio.maxAlarmVolume)
                 put("has_agc", features.audio.autoGainControl)
                 put("has_ns", features.audio.noiseSuppression)
                 put("has_aec", features.audio.acousticEchoCancellation)

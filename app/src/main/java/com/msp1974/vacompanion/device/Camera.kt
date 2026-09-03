@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CaptureRequest
+import android.util.Range
 import android.util.Size
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.Camera2Interop
@@ -30,12 +31,16 @@ import kotlin.time.Duration.Companion.milliseconds
 
 class Camera(val context: Context, val config: APPConfig) : EventListener {
 
+    companion object {
+        private const val TARGET_ANALYSIS_FPS = 4
+        private const val ANALYSIS_FRAME_INTERVAL_NS = 1_000_000_000L / TARGET_ANALYSIS_FPS
+    }
+
     private val job = SupervisorJob()
     private val scope = CoroutineScope(job + Dispatchers.IO)
     private val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
     private var cameraProvider: ProcessCameraProvider? = null
-    private var imageAnalysis: ImageAnalysis? = null
     
     private val motionEngine = MotionDetectionEngine()
     val motionFlow: SharedFlow<MotionResult> = motionEngine.motionFlow
@@ -50,7 +55,7 @@ class Camera(val context: Context, val config: APPConfig) : EventListener {
     private var faceDetected = false
     private var motionDetected = false
 
-    private var lastFrameTime = 0L
+    private var nextAnalysisTimestampNs = 0L
 
     init {
         config.eventBroadcaster.addListener(this)
@@ -128,7 +133,7 @@ class Camera(val context: Context, val config: APPConfig) : EventListener {
             setCaptureRequestOption(CaptureRequest.CONTROL_AE_ANTIBANDING_MODE, CaptureRequest.CONTROL_AE_ANTIBANDING_MODE_AUTO)
         }
         
-        imageAnalysis = analysisBuilder.build().also {
+        val analysis = analysisBuilder.build().also {
             it.setAnalyzer(cameraExecutor) { image ->
                 processImageProxy(image)
             }
@@ -138,7 +143,7 @@ class Camera(val context: Context, val config: APPConfig) : EventListener {
 
         try {
             cameraProvider.unbindAll()
-            
+
             // Check if we should actually be running
             if (config.motionDetectionMode == "none" || config.cameraStreamActive) {
                 Timber.w("Camera about to bind but motion detection disabled or stream active, skipping")
@@ -147,10 +152,31 @@ class Camera(val context: Context, val config: APPConfig) : EventListener {
                 return
             }
 
+            val baseSessionConfig = SessionConfig.Builder(analysis).build()
+            val selectedCameraInfo =
+                cameraProvider.getCameraInfo(cameraSelector, baseSessionConfig)
+            val supportedFrameRateRanges =
+                selectedCameraInfo.getSupportedFrameRateRanges(baseSessionConfig)
+            val targetFrameRateRange =
+                selectFrameRateRange(supportedFrameRateRanges, TARGET_ANALYSIS_FPS)
+            nextAnalysisTimestampNs = 0L
+
+            val sessionConfig = SessionConfig.Builder(analysis).apply {
+                if (targetFrameRateRange != null) {
+                    setFrameRateRange(targetFrameRateRange)
+                }
+            }.build()
+
+            Timber.i(
+                "Camera: Supported FPS ranges: %s; requested: %s",
+                supportedFrameRateRanges.sortedBy { it.upper }.joinToString(),
+                targetFrameRateRange ?: "CameraX default",
+            )
+
             val camera = cameraProvider.bindToLifecycle(
                 lifecycleOwner,
                 cameraSelector,
-                imageAnalysis
+                sessionConfig,
             )
             
             // Apply light optimizations if needed, but avoid forcing max exposure which ruins face detection
@@ -173,13 +199,33 @@ class Camera(val context: Context, val config: APPConfig) : EventListener {
         }
     }
 
+    private fun selectFrameRateRange(
+        supportedRanges: Set<Range<Int>>,
+        desiredFps: Int,
+    ): Range<Int>? {
+        // Prefer the lowest fixed camera rate that can still meet the analysis target.
+        val fixedRanges = supportedRanges.filter { it.lower == it.upper }
+        return fixedRanges
+            .filter { it.upper >= desiredFps }
+            .minByOrNull { it.upper }
+            ?: fixedRanges.maxByOrNull { it.upper }
+    }
+
     private fun processImageProxy(image: ImageProxy) {
-        val currentTime = System.currentTimeMillis()
-        if (currentTime - lastFrameTime < 250) {
+        val timestampNs = image.imageInfo.timestamp
+        if (nextAnalysisTimestampNs == 0L) {
+            nextAnalysisTimestampNs = timestampNs
+        }
+        if (timestampNs < nextAnalysisTimestampNs) {
             image.close()
             return
         }
-        lastFrameTime = currentTime
+
+        // Keep processing close to the target FPS when camera frames do not line up exactly.
+        nextAnalysisTimestampNs += ANALYSIS_FRAME_INTERVAL_NS
+        if (nextAnalysisTimestampNs <= timestampNs) {
+            nextAnalysisTimestampNs = timestampNs + ANALYSIS_FRAME_INTERVAL_NS
+        }
 
         var shouldCloseInFinally = true
         try {
@@ -343,7 +389,6 @@ class Camera(val context: Context, val config: APPConfig) : EventListener {
                 Timber.e("Camera: Error unbinding: $e")
             }
             cameraProvider = null
-            imageAnalysis = null
         }
 
         motionDetected = false

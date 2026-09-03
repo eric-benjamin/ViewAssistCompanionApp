@@ -64,6 +64,14 @@ class SensorManager(
             handleSensorUpdate(id, data)
         }
         sensors.add(sensor)
+
+        // Some sensors (e.g. MicInputSensor) compute and push their initial state during
+        // construction, which happens before onUpdate above is wired up - so that first push is
+        // silently dropped. Explicitly request a fresh update now that onUpdate is set; this is a
+        // no-op for sensors that rely on system callbacks/listeners for their updates instead.
+        deviceManager.deviceManagerScope.launch {
+            sensor.requestSensorUpdate(context)
+        }
     }
 
     private fun handleSensorUpdate(id: String, data: Any) {

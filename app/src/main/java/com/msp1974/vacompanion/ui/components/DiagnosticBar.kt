@@ -17,6 +17,7 @@ import androidx.compose.material.icons.filled.Face
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.*
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,13 +50,14 @@ private const val MIC_LEVEL_GAUGE_MAX_DBFS = 0f
 @Composable
 fun DiagnosticBar(
     diagnosticInfo: DiagnosticInfo,
-    onEvent: (com.msp1974.vacompanion.utils.Event) -> Unit = {},
+    onEvent: (Event) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val configuration = LocalConfiguration.current
     val isPortrait = configuration.orientation == Configuration.ORIENTATION_PORTRAIT
     var expanded by remember { mutableStateOf(false) }
     val labelColour = Color.White
+    val micLevel0to100 = ((diagnosticInfo.audioLevel - MIC_LEVEL_GAUGE_MIN_DBFS) / (MIC_LEVEL_GAUGE_MAX_DBFS - MIC_LEVEL_GAUGE_MIN_DBFS) * 100f).coerceIn(0f, 100f)
 
     Column(
         modifier = modifier
@@ -82,11 +84,11 @@ fun DiagnosticBar(
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         InfoGauge(
                             canvasSize = 130.dp,
-                            indicatorValue = diagnosticInfo.audioLevel,
-                            minIndicatorValue = MIC_LEVEL_GAUGE_MIN_DBFS,
-                            maxIndicatorValue = MIC_LEVEL_GAUGE_MAX_DBFS,
-                            decimalPlaces = 1,
-                            bigTextSuffix = "dB",
+                            indicatorValue = micLevel0to100,
+                            minIndicatorValue = 0f,
+                            maxIndicatorValue = 100f,
+                            decimalPlaces = 0,
+                            bigTextFontSize = MaterialTheme.typography.headlineSmall.fontSize,
                             smallText = "Mic",
                             foregroundIndicatorColor = CustomColours.GREEN,
                             disabledText = "Muted",
@@ -131,11 +133,11 @@ fun DiagnosticBar(
                 Row {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         InfoGauge(
-                            indicatorValue = diagnosticInfo.audioLevel,
-                            minIndicatorValue = MIC_LEVEL_GAUGE_MIN_DBFS,
-                            maxIndicatorValue = MIC_LEVEL_GAUGE_MAX_DBFS,
-                            decimalPlaces = 1,
-                            bigTextSuffix = "dB",
+                            indicatorValue = micLevel0to100,
+                            minIndicatorValue = 0f,
+                            maxIndicatorValue = 100f,
+                            decimalPlaces = 0,
+                            bigTextFontSize = MaterialTheme.typography.headlineSmall.fontSize,
                             smallText = "Mic Level",
                             foregroundIndicatorColor = CustomColours.GREEN,
                             disabledText = "Muted",

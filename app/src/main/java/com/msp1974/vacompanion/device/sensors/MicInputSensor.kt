@@ -31,9 +31,14 @@ class MicInputSensor(private val context: Context) : Sensor {
         }
     }
 
+    // Device connect/disconnect isn't the only thing that changes the active mic - a
+    // MicrophoneInput (re)starting also (re)resolves it without adding/removing any device, so
+    // that needs its own trigger to be reflected here.
+    private val activeMicInputListener: () -> Unit = { updateInputs() }
+
     init {
         audioManager.registerAudioDeviceCallback(deviceCallback, null)
-        updateInputs()
+        MicrophoneInput.addActiveMicInputListener(activeMicInputListener)
     }
 
     private fun updateInputs() {
@@ -76,5 +81,6 @@ class MicInputSensor(private val context: Context) : Sensor {
 
     override fun stop() {
         audioManager.unregisterAudioDeviceCallback(deviceCallback)
+        MicrophoneInput.removeActiveMicInputListener(activeMicInputListener)
     }
 }

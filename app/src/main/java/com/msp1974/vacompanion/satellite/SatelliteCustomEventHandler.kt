@@ -22,6 +22,7 @@ import kotlinx.serialization.json.putJsonObject
 import timber.log.Timber
 import java.time.Instant
 import java.time.format.DateTimeFormatter
+import kotlin.time.Duration.Companion.milliseconds
 
 
 class SatelliteCustomEventHandler(
@@ -83,6 +84,9 @@ class SatelliteCustomEventHandler(
             "musicVolume" -> {
                 volumeManager.setVolume(AudioManager.STREAM_MUSIC, event.newValue as Int)
             }
+            "alarmVolume" -> {
+                volumeManager.setVolume(AudioManager.STREAM_ALARM, event.newValue as Int)
+            }
             "wakeWord", "wakeWordSound", "wakeWordThreshold", "wakeWordEngine" -> {
                 scope.launch {
                     satellite.restartWakeWordDetection()
@@ -125,7 +129,7 @@ class SatelliteCustomEventHandler(
                 if (isOn && config.enableMotionDetection) {
                     // Force restart of camera when screen turns on to ensure recovery
                     scope.launch {
-                        delay(500)
+                        delay(500.milliseconds)
                         satellite.motionTask.startCamera()
                     }
                 }

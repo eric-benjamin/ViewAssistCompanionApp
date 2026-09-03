@@ -118,63 +118,78 @@ abstract class WyomingTCPServer(private val context: Context, val deviceManager:
                         break
                     }
 
-                    val remoteAddress = runCatching { socket.remoteAddress.toString() }
-                        .getOrElse {
-                            "unknown-remote(${it::class.simpleName})"
-                        }
-                    val id = runCatching { socket.remoteAddress.port().toString() }
-                        .getOrElse {
-                            "unknown-${System.nanoTime()}"
-                        }
-
-                    val data = buildJsonObject {
-                        put("remoteId", remoteAddress)
-                    }
-
-                    val client: WyomingClientHandler = object : WyomingClientHandler(scope, socket) {
-                        override suspend fun onClientDisconnected(clientId: String) {
-
-                            if (clientId in clients) {
-                                val client = clients[clientId]
-                                client?.handler?.stop()
-                                clients.remove(clientId)
+                    // Setting up a connection must never be able to stop the server.
+                    // A peer that connects and immediately disconnects (a TCP health
+                    // check, a port scan, `nc -z`) can make the setup below throw
+                    // ClosedChannelException. That used to escape to the outer
+                    // `catch (e: Throwable)`, which runs the `finally` block and shuts
+                    // down the whole Wyoming server - taking the satellite and any
+                    // in-progress media playback with it. Contain per-client failures
+                    // here so one transient peer cannot take everything down.
+                    try {
+                        val remoteAddress = runCatching { socket.remoteAddress.toString() }
+                            .getOrElse {
+                                "unknown-remote(${it::class.simpleName})"
                             }
-                            Timber.d("Client disconnected: $clientId.  Total: ${clients.size}")
-
-                            if (clientId == satellite?.clientId) {
-                                satellite?.clientId = ""
+                        val id = runCatching { socket.remoteAddress.port().toString() }
+                            .getOrElse {
+                                "unknown-${System.nanoTime()}"
                             }
 
-                            if (clients.isEmpty()) {
-                                Timber.d("No clients connected")
-                                satellite?.clientId = ""
-                                disconnectionMonitor()
-                            }
-                            updateStatus()
+                        val data = buildJsonObject {
+                            put("remoteId", remoteAddress)
                         }
 
-                        override suspend fun onWyomingMessage(
-                            clientId: String,
-                            message: WyomingPacket
-                        ) {
-                            try {
-                                // Added to prevent processing first message before client handler correctly setup
-                                withTimeout(250.milliseconds) {
-                                    while (clientId !in clients) {
-                                        delay(10.milliseconds)
-                                    }
+                        val client: WyomingClientHandler = object : WyomingClientHandler(scope, socket) {
+                            override suspend fun onClientDisconnected(clientId: String) {
+
+                                if (clientId in clients) {
+                                    val client = clients[clientId]
+                                    client?.handler?.stop()
+                                    clients.remove(clientId)
                                 }
-                                messageHandler(clientId, message)
-                            } catch (e: Exception) {
-                                Timber.e("Error processing message: $e")
+                                Timber.d("Client disconnected: $clientId.  Total: ${clients.size}")
+
+                                if (clientId == satellite?.clientId) {
+                                    satellite?.clientId = ""
+                                }
+
+                                if (clients.isEmpty()) {
+                                    Timber.d("No clients connected")
+                                    satellite?.clientId = ""
+                                    disconnectionMonitor()
+                                }
+                                updateStatus()
+                            }
+
+                            override suspend fun onWyomingMessage(
+                                clientId: String,
+                                message: WyomingPacket
+                            ) {
+                                try {
+                                    // Added to prevent processing first message before client handler correctly setup
+                                    withTimeout(250.milliseconds) {
+                                        while (clientId !in clients) {
+                                            delay(10.milliseconds)
+                                        }
+                                    }
+                                    messageHandler(clientId, message)
+                                } catch (e: Exception) {
+                                    Timber.e("Error processing message: $e")
+                                }
                             }
                         }
-                    }
 
-                    clients[id] = Connection(id, client)
-                    Timber.d("Client connected: ${socket.remoteAddress}.  Total: ${clients.size}")
-                    updateStatus()
-                    onEvent("client_connected", data)
+                        clients[id] = Connection(id, client)
+                        Timber.d("Client connected: ${socket.remoteAddress}.  Total: ${clients.size}")
+                        updateStatus()
+                        onEvent("client_connected", data)
+                    } catch (e: Throwable) {
+                        ensureActive()
+                        Timber.w("Discarding client connection that failed during setup: $e")
+                        runCatching { socket.close() }
+                        continue
+                    }
                 }
             } catch (e: Throwable) {
                 ensureActive()

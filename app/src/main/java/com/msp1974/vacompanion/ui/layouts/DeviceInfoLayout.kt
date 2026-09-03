@@ -17,10 +17,24 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.msp1974.vacompanion.audio.AudioEnhancerSource
+import com.msp1974.vacompanion.audio.MicrophoneInput
 import com.msp1974.vacompanion.settings.APPConfig
 import com.msp1974.vacompanion.ui.VAViewModel
 import com.msp1974.vacompanion.ui.components.MenuLayout
 import com.msp1974.vacompanion.ui.theme.CustomColours
+
+private fun enhancementSourceLabel(source: String): String = when (source) {
+    AudioEnhancerSource.HARDWARE -> "Hardware"
+    AudioEnhancerSource.SOFTWARE -> "Software"
+    else -> "Not Available"
+}
+
+private fun enhancementSourceColor(source: String): Color = when (source) {
+    AudioEnhancerSource.HARDWARE -> CustomColours.GREEN
+    AudioEnhancerSource.SOFTWARE -> CustomColours.AMBER
+    else -> CustomColours.RED
+}
 
 @Composable
 fun DeviceInfoLayout(
@@ -30,13 +44,10 @@ fun DeviceInfoLayout(
 ) {
     val vaUiState by viewModel.vacaState.collectAsState()
     val deviceInfo = remember { viewModel.deviceInfo }
-    
-    // Summary of Audio Capabilities
-    val audioSummary = buildString {
-        if (deviceInfo.features.audio.autoGainControl) append("AGC ")
-        if (deviceInfo.features.audio.noiseSuppression) append("NS ")
-        if (deviceInfo.features.audio.acousticEchoCancellation) append("AEC")
-    }.trim()
+
+    val audioEnhancementsSupported = deviceInfo.features.audio.autoGainControl ||
+        deviceInfo.features.audio.noiseSuppression ||
+        deviceInfo.features.audio.acousticEchoCancellation
 
     MenuLayout(
         title = "Device Info",
@@ -154,11 +165,39 @@ fun DeviceInfoLayout(
             item { HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp)) }
             item { SectionHeader("Audio") }
 
-            item { 
+            item {
                 InfoListItem(
                     icon = Icons.Default.GraphicEq,
-                    label = "Audio Enhancements",
-                    value = audioSummary.ifEmpty { "None supported" }
+                    label = "Audio Enhancements Supported",
+                    value = if (audioEnhancementsSupported) "Yes" else "No",
+                    valueColor = if (audioEnhancementsSupported) CustomColours.GREEN else CustomColours.AMBER
+                )
+            }
+
+            item {
+                InfoListItem(
+                    icon = Icons.Default.Equalizer,
+                    label = "Automatic Gain Control",
+                    value = enhancementSourceLabel(MicrophoneInput.agcSource),
+                    valueColor = enhancementSourceColor(MicrophoneInput.agcSource)
+                )
+            }
+
+            item {
+                InfoListItem(
+                    icon = Icons.Default.NoiseAware,
+                    label = "Noise Suppression",
+                    value = enhancementSourceLabel(MicrophoneInput.nsSource),
+                    valueColor = enhancementSourceColor(MicrophoneInput.nsSource)
+                )
+            }
+
+            item {
+                InfoListItem(
+                    icon = Icons.Default.PhoneInTalk,
+                    label = "Echo Cancellation",
+                    value = enhancementSourceLabel(MicrophoneInput.aecSource),
+                    valueColor = enhancementSourceColor(MicrophoneInput.aecSource)
                 )
             }
 

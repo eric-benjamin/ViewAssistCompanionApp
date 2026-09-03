@@ -21,7 +21,13 @@ class UnsupportedFunctionsDevice {
                 make = "lenovo",
                 model = "tb-8505fs",
                 issues = listOf(FunctionClasses.AUDIO_ENHANCEMENTS)
-            )
+            ),
+            // Portal+ has own very good audio handling
+            IssueDevice(
+                make = "facebook",
+                model = "portal+",
+                issues = listOf(FunctionClasses.AUDIO_ENHANCEMENTS)
+            ),
         )
 
 
@@ -32,11 +38,11 @@ class UnsupportedFunctionsDevice {
             for (device in issueDevices) {
                 if (functionClass in device.issues) {
                     if (manufacturer == device.make && model == device.model) {
-                        return false
+                        return true
                     }
                 }
             }
-            return true
+            return false
         }
     }
 }

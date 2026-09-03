@@ -88,4 +88,9 @@ class AudioDSP {
         }
         return byteBuffer
     }
+
+    fun shortArrayTo16BitPCMFloat(audioBuffer: ShortArray): FloatArray {
+        val floatBuffer = audioBuffer.map { it.toFloat() }.toFloatArray()
+        return floatBuffer
+    }
 }

@@ -21,7 +21,13 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.pow
 
-class   MicrophoneInput (
+object AudioEnhancerSource {
+    const val UNAVAILABLE = "unavailable"
+    const val HARDWARE = "hardware"
+    const val SOFTWARE = "software"
+}
+
+class MicrophoneInput (
     val config: APPConfig,
     val audioSource: Int = VACAAudioFormat.DEFAULT_AUDIO_SOURCE,
     val sampleRateInHz: Int = VACAAudioFormat.SAMPLE_RATE_HZ,
@@ -30,8 +36,45 @@ class   MicrophoneInput (
 ) : AutoCloseable {
 
     companion object {
+        private val activeMicInputListeners = mutableListOf<() -> Unit>()
+
+        // The active mic is only re-resolved when the input device set changes (see
+        // registerDeviceCallback) or a MicrophoneInput (re)starts - there's no periodic recompute -
+        // so listeners (MicInputSensor) need an explicit nudge whenever this changes rather than
+        // polling it.
         var activeMicInput: String = "None"
+            private set(value) {
+                field = value
+                activeMicInputListeners.forEach { it() }
+            }
+
+        fun addActiveMicInputListener(listener: () -> Unit) {
+            activeMicInputListeners.add(listener)
+        }
+
+        fun removeActiveMicInputListener(listener: () -> Unit) {
+            activeMicInputListeners.remove(listener)
+        }
+
+        // Resolved AGC/noise-suppression source, updated whenever a MicrophoneInput sets up its
+        // audio effects - hardware if the platform effect attached successfully, software if
+        // AudioEnhancer's fallback is running instead, unavailable before any mic has started.
+        var agcSource: String = AudioEnhancerSource.UNAVAILABLE
             private set
+        var nsSource: String = AudioEnhancerSource.UNAVAILABLE
+            private set
+
+        // AEC has no software fallback in this app (unlike AGC/NS), so it's purely a hardware
+        // capability check - computed once since it can't change at runtime.
+        val aecSource: String by lazy {
+            if (UnsupportedFunctionsDevice.isIssueDevice(FunctionClasses.AUDIO_ENHANCEMENTS)) {
+                AudioEnhancerSource.UNAVAILABLE
+            } else if (AcousticEchoCanceler.isAvailable()) {
+                AudioEnhancerSource.HARDWARE
+            } else {
+                AudioEnhancerSource.UNAVAILABLE
+            }
+        }
 
         fun getDeviceTypeName(type: Int): String {
             return when (type) {
@@ -50,27 +93,26 @@ class   MicrophoneInput (
     private var audioRecord: AudioRecord? = null
     private val context = config.context
 
-    private var aec: AcousticEchoCanceler? = null
     private var ns: NoiseSuppressor? = null
     private var agc: AutomaticGainControl? = null
-    private var hasHardwareAgc = false
-    private var hasHardwareNoiseSuppressor = false
-    private val audioEnhancer = AudioEnhancer(sampleRateInHz)
+
+    private val audioEnhancer = AudioEnhancer(sampleRateInHz, context)
+    private var totalFramesRead = 0L
 
     private var audioDSP = AudioDSP()
 
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val deviceCallback = object : android.media.AudioDeviceCallback() {
         override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
-            if (addedDevices.any { isBluetoothMic(it) }) {
-                Timber.d("Bluetooth microphone connected, updating preferred device")
+            if (addedDevices.any { isUsbMic(it) || isBluetoothMic(it) }) {
+                Timber.d("USB or Bluetooth microphone connected, updating preferred device")
                 updatePreferredDevice()
             }
         }
 
         override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
-            if (removedDevices.any { isBluetoothMic(it) }) {
-                Timber.d("Bluetooth microphone disconnected, updating preferred device")
+            if (removedDevices.any { isUsbMic(it) || isBluetoothMic(it) }) {
+                Timber.d("USB or Bluetooth microphone disconnected, updating preferred device")
                 updatePreferredDevice()
             }
         }
@@ -123,6 +165,7 @@ class   MicrophoneInput (
         var readCount = audioRecord.read(audioBuffer, 0, audioBuffer.size)
         if (stereo && readCount > 0) readCount -= readCount % 2   // whole frames only
         if (readCount > 0) {
+            totalFramesRead += readCount
             val frame = if (stereo) {
                 downmixToMono(audioBuffer, readCount)
             } else {
@@ -225,63 +268,102 @@ class   MicrophoneInput (
         )
     }
 
+    private fun isUsbMic(device: AudioDeviceInfo): Boolean {
+        return device.isSource && (
+            device.type == AudioDeviceInfo.TYPE_USB_DEVICE ||
+            device.type == AudioDeviceInfo.TYPE_USB_HEADSET
+        )
+    }
+
+    // Mic selection priority: USB > Bluetooth > built-in.
     private fun updatePreferredDevice(record: AudioRecord? = audioRecord) {
         val currentRecord = record ?: return
         val devices = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
+        for (device in devices) {
+            Timber.d("MIC Device: ${device.productName}, type: ${getDeviceTypeName(device.type)}")
+        }
+
+        val usbDevice = devices.firstOrNull { isUsbMic(it) }
         val bluetoothDevice = devices.firstOrNull { isBluetoothMic(it) }
 
-        if (bluetoothDevice != null) {
-            // Check for BLUETOOTH_CONNECT permission on Android 12+
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                if (androidx.core.content.ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
-                    Timber.w("BLUETOOTH_CONNECT permission not granted, requesting...")
-                    BroadcastSender.sendBroadcast(context, BroadcastSender.OPEN_PERMISSION_SCREEN, Manifest.permission.BLUETOOTH_CONNECT)
-                    return
-                }
-            }
-
-            // Explicitly handle SCO for older devices or specific headset behaviors
-            if (bluetoothDevice.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO) {
-                try {
-                    // Ensure speakerphone is off for SCO to work correctly
-                    if (audioManager.isSpeakerphoneOn) {
-                        audioManager.isSpeakerphoneOn = false
-                    }
-
-                    if (audioManager.mode != AudioManager.MODE_IN_COMMUNICATION) {
-                        audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-                    }
-
-                    if (!audioManager.isBluetoothScoOn) {
-                        Timber.d("Starting Bluetooth SCO")
-                        audioManager.startBluetoothSco()
-                        audioManager.isBluetoothScoOn = true
-                    }
-                    Timber.d("Bluetooth SCO state: ${audioManager.isBluetoothScoOn}, mode: ${audioManager.mode}")
-                } catch (e: Exception) {
-                    Timber.e(e, "Error starting Bluetooth SCO")
-                }
-            }
-
-            Timber.d("Setting preferred microphone: ${bluetoothDevice.productName}")
-            val success = currentRecord.setPreferredDevice(bluetoothDevice)
-            Timber.d("setPreferredDevice success: $success")
-
-            activeMicInput = "${bluetoothDevice.productName}"
-        } else {
-            val builtInMic = devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_MIC }
-            activeMicInput = builtInMic?.let { "${it.productName} (Built-in Mic)" } ?: "Built-in Mic"
-
-            if (audioManager.isBluetoothScoOn || audioManager.mode == AudioManager.MODE_IN_COMMUNICATION) {
-                audioManager.isBluetoothScoOn = false
-                audioManager.stopBluetoothSco()
-                audioManager.mode = AudioManager.MODE_NORMAL
-                Timber.d("Bluetooth SCO stopped and mode set to NORMAL")
-            }
+        when {
+            usbDevice != null -> selectUsbDevice(currentRecord, usbDevice)
+            bluetoothDevice != null -> selectBluetoothDevice(currentRecord, bluetoothDevice)
+            else -> selectBuiltInDevice(currentRecord, devices)
         }
     }
 
-    private fun setupAudioEffects(attachAec: Boolean = true, attachNs: Boolean = true, attachAgc: Boolean = true) {
+    private fun selectUsbDevice(currentRecord: AudioRecord, device: AudioDeviceInfo) {
+        stopBluetoothScoIfActive()
+
+        Timber.d("Setting preferred microphone: ${device.productName} (${getDeviceTypeName(device.type)})")
+        val success = currentRecord.setPreferredDevice(device)
+        Timber.d("setPreferredDevice success: $success")
+
+        activeMicInput = "${device.productName} (USB)"
+    }
+
+    private fun selectBluetoothDevice(currentRecord: AudioRecord, device: AudioDeviceInfo) {
+        // Check for BLUETOOTH_CONNECT permission on Android 12+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (androidx.core.content.ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                Timber.w("BLUETOOTH_CONNECT permission not granted, requesting...")
+                BroadcastSender.sendBroadcast(context, BroadcastSender.OPEN_PERMISSION_SCREEN, Manifest.permission.BLUETOOTH_CONNECT)
+                return
+            }
+        }
+
+        // Explicitly handle SCO for older devices or specific headset behaviors
+        if (device.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO) {
+            try {
+                // Ensure speakerphone is off for SCO to work correctly
+                if (audioManager.isSpeakerphoneOn) {
+                    audioManager.isSpeakerphoneOn = false
+                }
+
+                if (audioManager.mode != AudioManager.MODE_IN_COMMUNICATION) {
+                    audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+                }
+
+                if (!audioManager.isBluetoothScoOn) {
+                    Timber.d("Starting Bluetooth SCO")
+                    audioManager.startBluetoothSco()
+                    audioManager.isBluetoothScoOn = true
+                }
+                Timber.d("Bluetooth SCO state: ${audioManager.isBluetoothScoOn}, mode: ${audioManager.mode}")
+            } catch (e: Exception) {
+                Timber.e(e, "Error starting Bluetooth SCO")
+            }
+        }
+
+        Timber.d("Setting preferred microphone: ${device.productName}")
+        val success = currentRecord.setPreferredDevice(device)
+        Timber.d("setPreferredDevice success: $success")
+
+        activeMicInput = "${device.productName}"
+    }
+
+    private fun selectBuiltInDevice(currentRecord: AudioRecord, devices: Array<AudioDeviceInfo>) {
+        stopBluetoothScoIfActive()
+
+        val builtInMic = devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_MIC }
+        activeMicInput = builtInMic?.let { "${it.productName} (Built-in Mic)" } ?: "Built-in Mic"
+
+        // Clear any previously set preferred device (e.g. USB/Bluetooth) so recording
+        // falls back to the built-in mic.
+        currentRecord.setPreferredDevice(builtInMic)
+    }
+
+    private fun stopBluetoothScoIfActive() {
+        if (audioManager.isBluetoothScoOn || audioManager.mode == AudioManager.MODE_IN_COMMUNICATION) {
+            audioManager.isBluetoothScoOn = false
+            audioManager.stopBluetoothSco()
+            audioManager.mode = AudioManager.MODE_NORMAL
+            Timber.d("Bluetooth SCO stopped and mode set to NORMAL")
+        }
+    }
+
+    private fun setupAudioEffects(attachNs: Boolean = true, attachAgc: Boolean = true) {
         val sessionId = audioRecord?.audioSessionId ?: return
 
         // Catch if issue with audio enhancements and do not load any platform effects -
@@ -289,35 +371,49 @@ class   MicrophoneInput (
         val skipHardwareEffects = UnsupportedFunctionsDevice.isIssueDevice(FunctionClasses.AUDIO_ENHANCEMENTS)
 
         if (!skipHardwareEffects) {
-            if (attachAgc && AutomaticGainControl.isAvailable()) {
-                try {
-                    agc = AutomaticGainControl.create(sessionId)?.apply { enabled = true }
-                } catch (e: Exception) {
-                    Timber.w("Failed to attach hardware AGC: ${e.message}")
+            if (attachAgc) {
+                if (AutomaticGainControl.isAvailable()) {
+                    try {
+                        agc = AutomaticGainControl.create(sessionId)?.apply { enabled = true }
+                        if (agc != null) agcSource = AudioEnhancerSource.HARDWARE
+                    } catch (e: Exception) {
+                        Timber.w("Failed to attach hardware AGC: ${e.message}")
+                    }
+                }
+                if (agc == null) {
+                    audioEnhancer.agcEnabled = true
+                    agcSource = AudioEnhancerSource.SOFTWARE
                 }
             }
 
-            if (attachAec && AcousticEchoCanceler.isAvailable()) {
-                try {
-                    aec = AcousticEchoCanceler.create(sessionId)?.apply { enabled = true }
-                } catch (e: Exception) {
-                    Timber.w("Failed to attach hardware echo canceler: ${e.message}")
+            if (attachNs) {
+                if (NoiseSuppressor.isAvailable()) {
+                    try {
+                        ns = NoiseSuppressor.create(sessionId)?.apply { enabled = true }
+                        if (ns != null) nsSource = AudioEnhancerSource.HARDWARE
+                    } catch (e: Exception) {
+                        Timber.w("Failed to attach hardware noise suppressor: ${e.message}")
+                    }
+                }
+                if (ns == null) {
+                    audioEnhancer.noiseSuppressionEnabled = true
+                    nsSource = AudioEnhancerSource.SOFTWARE
                 }
             }
-
-            if (attachNs && NoiseSuppressor.isAvailable()) {
-                try {
-                    ns = NoiseSuppressor.create(sessionId)?.apply { enabled = true }
-                } catch (e: Exception) {
-                    Timber.w("Failed to attach hardware noise suppressor: ${e.message}")
-                }
+        } else {
+            Timber.d("Skipping hardware audio enhancements on this device")
+            if (attachAgc) {
+                audioEnhancer.agcEnabled = true
+                agcSource = AudioEnhancerSource.SOFTWARE
+            }
+            if (attachNs) {
+                audioEnhancer.noiseSuppressionEnabled = true
+                nsSource = AudioEnhancerSource.SOFTWARE
             }
         }
 
-        hasHardwareAgc = agc?.enabled == true
-        hasHardwareNoiseSuppressor = ns?.enabled == true
-
-        // SOFTWARE ENHANCER OFF IN THIS HOUSE (2026-07-28).
+        // SOFTWARE ENHANCER OFF IN THIS HOUSE (2026-07-28, re-applied over the
+        // v0.13.0 merge 2026-09-03).
         //
         // Upstream enables its software AGC + spectral noise suppressor wherever
         // the platform effects are missing. On the ThinkSmart View (LineageOS
@@ -330,19 +426,21 @@ class   MicrophoneInput (
         // gain-masking produces musical noise on speech), with the AGC boosting
         // room tone toward its -18 dBFS target between words. Leaving them off
         // restores the raw capture path that was verified good on this hardware;
-        // mic_gain goes back to being a plain dB trim (see readShort).
+        // mic_gain goes back to being a plain dB trim (see readShort). The
+        // diagnostics report them as unavailable, which is the truth of this build.
         audioEnhancer.agcEnabled = false
         audioEnhancer.noiseSuppressionEnabled = false
+        agcSource = AudioEnhancerSource.UNAVAILABLE
+        nsSource = AudioEnhancerSource.UNAVAILABLE
         audioEnhancer.reset()
-
         Timber.d(
-            "Audio enhancement - AGC: ${if (hasHardwareAgc) "hardware" else "software"}, " +
-                    "AEC: ${if (aec?.enabled == true) "hardware" else "unavailable"}, NS: ${if (hasHardwareNoiseSuppressor) "hardware" else "software"}"
+            "Audio enhancement - AGC: ${agcSource}, NS: ${nsSource}"
         )
     }
 
     override fun close() {
         unregisterDeviceCallback()
+        audioEnhancer.release()
 
         if (audioManager.isBluetoothScoOn) {
             audioManager.isBluetoothScoOn = false
@@ -353,9 +451,6 @@ class   MicrophoneInput (
 
         agc?.release()
         agc = null
-
-        aec?.release()
-        aec = null
 
         ns?.release()
         ns = null

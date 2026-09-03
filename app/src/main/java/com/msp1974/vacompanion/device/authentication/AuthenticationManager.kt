@@ -4,14 +4,15 @@ import androidx.core.net.toUri
 import com.msp1974.vacompanion.settings.APPConfig
 import io.ktor.client.call.body
 import io.ktor.http.isSuccess
-import timber.log.Timber
-import java.net.ConnectException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.net.URL
 
 class AuthenticationManager(
     val config: APPConfig
 ) {
     private val authenticationService = AuthenticationService()
+    private val sessionMutex = Mutex()
 
     suspend fun buildBearerToken(): String {
         ensureValidSession()
@@ -19,10 +20,25 @@ class AuthenticationManager(
     }
 
     suspend fun ensureValidSession(forceRefresh: Boolean = false) {
-        if (isExpired() || forceRefresh || config.accessToken == "") {
-            // Failures must propagate so callers can report auth failure to the
-            // frontend instead of continuing with a stale token
-            refreshSessionWithToken(config.refreshToken)
+        val accessTokenBeforeLock = config.accessToken
+
+        sessionMutex.withLock {
+            // Another external-auth request may have refreshed the session while this
+            // request was waiting for the lock. In that case, reuse the new token even
+            // if both requests arrived with force=true.
+            val refreshedWhileWaiting =
+                accessTokenBeforeLock != config.accessToken && !isExpired()
+            val refreshRequired =
+                isExpired() || config.accessToken.isBlank() || (forceRefresh && !refreshedWhileWaiting)
+
+            if (refreshRequired) {
+                if (config.refreshToken.isBlank()) {
+                    throw AuthenticationException("No refresh token available", 0, null)
+                }
+                // Do not swallow refresh failures. Callers must never treat an expired
+                // access token as a successful external-auth response.
+                refreshSessionWithToken(config.refreshToken)
+            }
         }
     }
 
@@ -42,18 +58,24 @@ class AuthenticationManager(
         return authenticationService.refreshToken(
             url = getBaseUrl(),
             refreshToken = refreshToken,
-        ).let {
-            if (it.status.isSuccess()) {
-                val refreshedToken = it.body<Token>()
+        ).let { response ->
+            if (response.status.isSuccess()) {
+                val refreshedToken = response.body<Token>()
                 //TODO: Make this an object on DeviceManager session info
                 config.accessToken = refreshedToken.accessToken
                 config.tokenExpiry = System.currentTimeMillis() + (refreshedToken.expiresIn * 1000)
                 return@let
-            } else if (it.status.value == 400 && it.body<String>().contains("invalid_grant")
-            ) {
-                revokeSession()
             }
-            throw AuthenticationException("Failed to refresh token", it.status.value, it.body<String?>())
+
+            val errorBody = response.body<String?>()
+            if (response.status.value == 400 && errorBody?.contains("invalid_grant") == true) {
+                // The refresh credential is no longer usable. Clear the local session
+                // without making another request with the already-invalid token.
+                config.accessToken = ""
+                config.refreshToken = ""
+                config.tokenExpiry = 0
+            }
+            throw AuthenticationException("Failed to refresh token", response.status.value, errorBody)
         }
     }
 

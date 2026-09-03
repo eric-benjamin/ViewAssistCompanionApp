@@ -1,5 +1,6 @@
   package com.msp1974.vacompanion.audio
 
+import android.content.Context
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
@@ -25,13 +26,16 @@ import kotlin.math.sqrt
  * than only ever attenuating, so devices with a quiet built-in mic still get
  * a usable average level with `mic_gain` left at its default of 0.
  */
-class AudioEnhancer(sampleRate: Int = VACAAudioFormat.SAMPLE_RATE_HZ) {
+class AudioEnhancer(
+    private val sampleRate: Int = VACAAudioFormat.SAMPLE_RATE_HZ,
+    private val context: Context? = null,
+) {
 
     var agcEnabled = false
     var noiseSuppressionEnabled = false
 
     private val agc = AutomaticGainController(sampleRate)
-    private val noiseSuppressor = SpectralNoiseSuppressor(sampleRate = sampleRate)
+    private val noiseSuppressor: NoiseSuppressor = SpectralNoiseSuppressor(sampleRate = sampleRate)
 
     /**
      * Maps the HA-configurable `mic_gain` setting (dB, range -10..10) onto the AGC's
@@ -47,9 +51,10 @@ class AudioEnhancer(sampleRate: Int = VACAAudioFormat.SAMPLE_RATE_HZ) {
 
     fun processFrame(input: ShortArray): ShortArray {
         if (input.isEmpty()) return input
-        // Noise suppression runs first so the AGC levels the cleaned signal
-        // rather than amplifying residual noise along with speech.
-        var processed = if (noiseSuppressionEnabled) noiseSuppressor.process(input) else input
+        // Noise suppression cleans up generic noise, then the AGC levels the final, cleaned signal.
+        var processed = input
+
+        if (noiseSuppressionEnabled) processed = noiseSuppressor.process(processed)
         if (agcEnabled) processed = agc.process(processed)
         return processed
     }
@@ -57,6 +62,11 @@ class AudioEnhancer(sampleRate: Int = VACAAudioFormat.SAMPLE_RATE_HZ) {
     fun reset() {
         agc.reset()
         noiseSuppressor.reset()
+    }
+
+    /** Releases any native resources the current [NoiseSuppressor] implementation holds. */
+    fun release() {
+        noiseSuppressor.release()
     }
 
     companion object {
@@ -70,7 +80,7 @@ class AudioEnhancer(sampleRate: Int = VACAAudioFormat.SAMPLE_RATE_HZ) {
  * Digital automatic gain control operating in the dBFS domain: an envelope
  * follower estimates the current signal level, gain is derived from the gap
  * to [targetLevelDbfs] and clamped to [-maxAttenuationDb, maxGainDb], and a
- * soft noise gate fades the correction out during near-silence so background
+ * noise gate fades the correction out during near-silence so background
  * noise isn't cranked up towards the target level between utterances. A
  * limiter is applied as a safety net against clipping.
  *
@@ -79,19 +89,37 @@ class AudioEnhancer(sampleRate: Int = VACAAudioFormat.SAMPLE_RATE_HZ) {
  * including boosting devices with a quiet built-in mic - rather than only
  * ever attenuating; [maxGainDb]/[maxAttenuationDb] are generous enough to
  * cover the full range [AudioEnhancer.setMicGainDb] can shift the target to.
+ *
+ * The gate itself is threshold-free by design: a single fixed dBFS cutoff can't fit every
+ * microphone, since raw input level for the same physical loudness varies wildly device to
+ * device (a quiet-mic device's speech may never reach a threshold tuned for a sensitive one,
+ * while a sensitive-mic device's idle self-noise alone may already exceed it, leaving the gate
+ * permanently open). Instead the gate threshold auto-calibrates per device, tracked
+ * [noiseGateMarginDb] above a running estimate of *this* microphone's own ambient floor
+ * ([noiseFloorDb] - drops instantly to a quieter reading so it converges on the true floor found
+ * in gaps between speech/noise, rises only slowly so a transient loud burst isn't mistaken for a
+ * shift in the baseline), clamped to [minNoiseGateThresholdDbfs]/[maxNoiseGateThresholdDbfs] as a
+ * safety net against a pathological floor reading.
  */
 class AutomaticGainController(
     sampleRate: Int,
     var targetLevelDbfs: Float = BASE_TARGET_LEVEL_DBFS,
-    var maxGainDb: Float = 30f,
+    var maxGainDb: Float = 50f,
     var maxAttenuationDb: Float = 30f,
-    var noiseGateThresholdDbfs: Float = -50f,
+    var noiseGateMarginDb: Float = 10f,
+    var minNoiseGateThresholdDbfs: Float = -65f,
+    var maxNoiseGateThresholdDbfs: Float = -20f,
     envelopeAttackMs: Float = 3f,
-    envelopeReleaseMs: Float = 250f,
+    envelopeReleaseMs: Float = 500f,
+    noiseFloorRiseMs: Float = 5000f,
 ) {
     private val attackCoeff = timeConstantToCoeff(envelopeAttackMs, sampleRate)
     private val releaseCoeff = timeConstantToCoeff(envelopeReleaseMs, sampleRate)
+    private val noiseFloorRiseCoeff = timeConstantToCoeff(noiseFloorRiseMs, sampleRate)
     private var envelope = 0f
+
+    /** Per-device ambient noise floor estimate (dBFS) the gate threshold is calibrated against. */
+    private var noiseFloorDb = Float.POSITIVE_INFINITY
 
     fun process(input: ShortArray): ShortArray {
         val output = ShortArray(input.size)
@@ -107,9 +135,22 @@ class AutomaticGainController(
 
             val levelDb = linearToDb(envelope)
             val computedGainDb = (targetLevelDbfs - levelDb).coerceIn(-maxAttenuationDb, maxGainDb)
-            // Fade the correction out smoothly below the gate threshold instead of
-            // an on/off step, so there's no audible click as speech resumes.
-            val gateOpenness = ((levelDb - noiseGateThresholdDbfs) / GATE_TRANSITION_DB).coerceIn(0f, 1f)
+
+            // Auto-calibrating noise floor - see the class doc. Float.POSITIVE_INFINITY as the
+            // initial value means the very first sample always takes the instant-drop branch,
+            // seeding the estimate immediately rather than climbing up to it from some arbitrary
+            // fixed starting point.
+            noiseFloorDb = if (levelDb < noiseFloorDb) {
+                levelDb
+            } else {
+                noiseFloorDb + (levelDb - noiseFloorDb) * noiseFloorRiseCoeff
+            }
+            val adaptiveGateThresholdDbfs = (noiseFloorDb + noiseGateMarginDb)
+                .coerceIn(minNoiseGateThresholdDbfs, maxNoiseGateThresholdDbfs)
+
+            // Fade the correction out smoothly below the gate threshold instead of an on/off
+            // step, so there's no audible click as speech resumes.
+            val gateOpenness = ((levelDb - adaptiveGateThresholdDbfs) / GATE_TRANSITION_DB).coerceIn(0f, 1f)
             val gainDb = computedGainDb * gateOpenness
 
             val processed = (sample * dbToLinear(gainDb)).coerceIn(-0.98f, 0.98f)
@@ -120,6 +161,7 @@ class AutomaticGainController(
 
     fun reset() {
         envelope = 0f
+        noiseFloorDb = Float.POSITIVE_INFINITY
     }
 
     companion object {
@@ -141,6 +183,20 @@ class AutomaticGainController(
 }
 
 /**
+ * Common contract for [AudioEnhancer]'s noise suppression stage - see [SpectralNoiseSuppressor],
+ * the hand-rolled spectral subtraction implementation.
+ */
+interface NoiseSuppressor {
+    /** Accepts arbitrary-length chunks, returning exactly `input.size` samples. */
+    fun process(input: ShortArray): ShortArray
+
+    fun reset()
+
+    /** Releases any native/OS resources held. No-op unless overridden. */
+    fun release() {}
+}
+
+/**
  * Frequency-domain noise suppressor using overlap-add STFT spectral
  * subtraction (Berouti over-subtraction with a spectral floor), a standard,
  * well-understood approach to single-channel noise suppression.
@@ -157,7 +213,7 @@ class AutomaticGainController(
 class SpectralNoiseSuppressor(
     private val fftSize: Int = 256,
     private val sampleRate: Int = VACAAudioFormat.SAMPLE_RATE_HZ,
-) {
+) : NoiseSuppressor {
     init {
         require(fftSize and (fftSize - 1) == 0) { "fftSize must be a power of two" }
     }
@@ -191,7 +247,7 @@ class SpectralNoiseSuppressor(
     /** Temporal smoothing applied to the per-bin gain curve to reduce musical noise. */
     var gainSmoothing = 0.6f
 
-    fun process(input: ShortArray): ShortArray {
+    override fun process(input: ShortArray): ShortArray {
         if (input.isEmpty()) return input
 
         val combined = FloatArray(pendingInput.size + input.size)
@@ -265,7 +321,7 @@ class SpectralNoiseSuppressor(
         return outHop
     }
 
-    fun reset() {
+    override fun reset() {
         prevInputTail.fill(0f)
         overlapCarry.fill(0f)
         pendingInput = FloatArray(0)

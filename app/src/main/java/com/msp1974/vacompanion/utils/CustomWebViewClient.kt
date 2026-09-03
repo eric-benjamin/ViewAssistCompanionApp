@@ -134,6 +134,25 @@ class CustomWebViewClient(val viewModel: VAViewModel): WebViewClientCompat()  {
     }
 
     override fun onPageFinished(view: WebView?, url: String?) {
+        val haBaseUrl = viewModel.deviceManager.authenticationManager
+            .getBaseUrl()
+            .toString()
+            .removeSuffix("/")
+        if (
+            view is CustomWebView &&
+            !url.isNullOrBlank() &&
+            url.startsWith(haBaseUrl, ignoreCase = true) &&
+            !url.contains("/auth/authorize") &&
+            config.accessToken.isNotBlank() &&
+            config.refreshToken.isNotBlank()
+        ) {
+            // A reconnect can replace the page while a native refresh is in flight,
+            // losing the original JavaScript callback. Re-inject the current session
+            // after the replacement page is ready.
+            viewModel.viewModelScope.launch {
+                view.requestAuthorisation()
+            }
+        }
         if (url != ERROR_URL && viewModel.vacaState.value.webViewPageLoadingStage == PageLoadingStage.AUTHORISED) {
             Handler(Looper.getMainLooper()).postDelayed({
                 setPageLoadingState(PageLoadingStage.LOADED)

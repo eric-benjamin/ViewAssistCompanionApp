@@ -128,7 +128,7 @@ open class MicroWakeWordEngine (
                     Timber.i("Stopping MicroWakeWordEngine")
                     microphoneInput.close()
                     detector?.close()
-                    emit(AudioResult.EngineStatus("Stopped"))
+                    //emit(AudioResult.EngineStatus("Stopped"))
                 }
             }
     }

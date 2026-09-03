@@ -2,14 +2,12 @@ package com.msp1974.vacompanion.players
 
 import android.annotation.SuppressLint
 import android.app.Service
-import android.content.Context
 import android.content.Intent
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
-import android.os.Build
 import android.os.IBinder
 import androidx.media3.common.util.UnstableApi
 import com.msp1974.vacompanion.gideon.GideonVoiceMeter
@@ -179,7 +177,6 @@ class VoicePlayerService : Service() {
 
                     AudioManager.AUDIOFOCUS_LOSS -> {
                         hasAudioFocus = false
-                        stop(true)
                     }
 
                     AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
@@ -187,6 +184,7 @@ class VoicePlayerService : Service() {
                     }
 
                     AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                        hasAudioFocus = false
                         mediaPlayer?.setVolume(0.2f)
                     }
                 }

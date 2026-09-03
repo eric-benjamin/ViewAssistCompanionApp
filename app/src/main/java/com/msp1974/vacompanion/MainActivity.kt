@@ -275,9 +275,6 @@ class MainActivity : AppCompatActivity(), EventListener, ComponentCallbacks2 {
         webViewClient = CustomWebViewClient(viewModel)
         webView = CustomWebView.getView(this)
         webView.initialise(deviceManager, webViewClient)
-        // The page state singleton outlives the activity, but this WebView is
-        // brand new and blank — reset so satellite (re)starts know to load
-        deviceManager.updateWebViewPageLoadingStage(PageLoadingStage.NOT_STARTED)
         webView.layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
@@ -376,20 +373,9 @@ class MainActivity : AppCompatActivity(), EventListener, ComponentCallbacks2 {
                     setScreenSettings()
                     webView.setZoomLevel(config.zoomLevel)
                     config.screenOn = screen.isScreenOn()
-                    // Satellite restarts whenever HA reconnects (e.g. after the device
-                    // dozes and drops the TCP connection) — only load the page if it
-                    // isn't already showing healthy content
-                    val webviewState = viewModel.vacaState.value.webViewPageLoadingStage
-                    if (webviewState == PageLoadingStage.NOT_STARTED ||
-                        webviewState == PageLoadingStage.ERROR ||
-                        webviewState == PageLoadingStage.AUTH_FAILED ||
-                        webviewState == PageLoadingStage.AUTH_REQUIRED) {
-                        val url = deviceManager.authenticationManager.getHAUrl()
-                        Timber.d("Satellite started -> loading URL: $url")
-                        webView.loadUrl(url)
-                    } else {
-                        Timber.d("Satellite started -> page healthy ($webviewState), not reloading")
-                    }
+                    val url = deviceManager.authenticationManager.getHAUrl()
+                    Timber.d("Satellite started -> loading URL: $url")
+                    webView.loadUrl(url)
                 }
                 BroadcastSender.SATELLITE_CLIENT_UPDATED -> {
                     val webviewState = viewModel.vacaState.value.webViewPageLoadingStage
@@ -506,12 +492,6 @@ class MainActivity : AppCompatActivity(), EventListener, ComponentCallbacks2 {
             Timber.e("Error destroying MainActivity: ${e.message}")
         } finally {
             super.onDestroy()
-            // The process outlives the activity (foreground service), so a WebView
-            // left undestroyed leaks its renderer — holding the camera and keeping
-            // its WebRTC publish open as a zombie until the process dies
-            if (this::webView.isInitialized) {
-                webView.destroy()
-            }
         }
     }
 
@@ -667,28 +647,28 @@ class MainActivity : AppCompatActivity(), EventListener, ComponentCallbacks2 {
 
     fun setDarkMode(isDark: Boolean) {
         log.d("Setting dark mode: $isDark")
-
-        if (isDark) {
-            AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES)
-        } else{
-            AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_NO)
-        }
-
-        // Set device dark mode. Best-effort only: when this app is the device's
-        // HOME app, setApplicationNightMode can throw IllegalStateException from
-        // the window manager ("Can't change activity type once set" — the stored
-        // per-app config still carries activityType=standard). The call is purely
-        // cosmetic next to the in-app theme above and the webview darkening
-        // below, which cover everything visible — never crash for it.
         try {
+            if (isDark) {
+                AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES)
+            } else {
+                AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_NO)
+            }
+
+            // Set device dark mode. Best-effort only: when this app is the device's
+            // HOME app, setApplicationNightMode can throw IllegalStateException from
+            // the window manager ("Can't change activity type once set" - the stored
+            // per-app config still carries activityType=standard). The call is purely
+            // cosmetic next to the in-app theme above and the webview darkening
+            // below, which cover everything visible - never crash for it.
             val uiModeManager = getSystemService(UI_MODE_SERVICE) as UiModeManager
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 uiModeManager.setApplicationNightMode(if (isDark) UiModeManager.MODE_NIGHT_YES else UiModeManager.MODE_NIGHT_NO)
             } else {
-                uiModeManager.nightMode = if (isDark) UiModeManager.MODE_NIGHT_YES else UiModeManager.MODE_NIGHT_NO
+                uiModeManager.nightMode =
+                    if (isDark) UiModeManager.MODE_NIGHT_YES else UiModeManager.MODE_NIGHT_NO
             }
         } catch (e: Exception) {
-            log.w("Could not set application night mode: $e")
+            log.w("Error setting dark mode: ${e.message}")
         }
 
         webView.refreshDarkMode(isDark)

@@ -9,6 +9,7 @@ import androidx.core.net.toUri
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.audio.AudioFocusRequestCompat
 import androidx.media3.common.audio.AudioManagerCompat
@@ -26,6 +27,7 @@ import timber.log.Timber
 import javax.inject.Inject
 import kotlin.math.min
 
+@SuppressLint("UnsafeOptInUsageError")
 @AndroidEntryPoint
 class MusicPlayerService : Service() {
 
@@ -42,6 +44,13 @@ class MusicPlayerService : Service() {
     private var musicVolume: Float = 1f
     private var ducked: Boolean = false
 
+    // Player.getVolume() is only accessible on the main thread, but unDuckVolume()/
+    // animateUnDuckingVolume() need the current volume for comparisons/animation math that can
+    // run off it - so the current volume is cached here (kept in sync by setPlayerVolume(), the
+    // only place that should ever assign mediaPlayer?.volume) instead of read from the player.
+    @Volatile
+    private var currentOutputVolume: Float = 1f
+
     private val job = SupervisorJob()
     private val scope = CoroutineScope(Dispatchers.Default + job)
 
@@ -54,29 +63,47 @@ class MusicPlayerService : Service() {
         .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
         .build()
 
-
     override fun onCreate() {
         super.onCreate()
         sInstance = this
         audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
     }
 
+    val mediaPlayerListener = object : Player.Listener {
+        override fun onIsPlayingChanged(isPlaying: Boolean) {
+            val event = Event("musicPlayerPlayingStatus", oldValue = !isPlaying, newValue = isPlaying)
+            config.eventBroadcaster.notifyEvent(event)
+
+            super.onIsPlayingChanged(isPlaying)
+        }
+
+        override fun onPlayerError(error: PlaybackException) {
+            Timber.e("Player error - recreating player....")
+            stop()
+            createMediaPlayer()
+            super.onPlayerError(error)
+        }
+
+        override fun onPlayerErrorChanged(error: PlaybackException?) {
+            Timber.e("Player error changed - recreating player....")
+            super.onPlayerErrorChanged(error)
+        }
+    }
+
+    private fun createMediaPlayer() {
+        mediaPlayer = ExoPlayer.Builder(this)
+            .setAudioAttributes(audioAttributes, false)
+            .build().apply {
+                repeatMode = Player.REPEAT_MODE_OFF
+            }
+        mediaPlayer!!.addListener(mediaPlayerListener)
+    }
+
+
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (mediaPlayer == null) {
-
-            mediaPlayer = ExoPlayer.Builder(this)
-                .setAudioAttributes(audioAttributes, false)
-                .build().apply {
-                    repeatMode = Player.REPEAT_MODE_OFF
-                }
-            mediaPlayer?.addListener(object : Player.Listener {
-                override fun onIsPlayingChanged(isPlaying: Boolean) {
-                    val event = Event("musicPlayerPlayingStatus", oldValue = !isPlaying, newValue = isPlaying)
-                    config.eventBroadcaster.notifyEvent(event)
-
-                    super.onIsPlayingChanged(isPlaying)
-                }
-            })
+            createMediaPlayer()
         }
 
         val url = intent?.getStringExtra("url") ?: ""
@@ -94,7 +121,7 @@ class MusicPlayerService : Service() {
                 mediaPlayer?.let { player ->
                     player.setMediaItem(mediaItem)
                     player.prepare()
-                    player.volume = musicVolume
+                    setPlayerVolume(musicVolume)
                     player.play()
                 }
                 requestAudioFocus()
@@ -125,6 +152,7 @@ class MusicPlayerService : Service() {
         Timber.d("Music player: Stopping music")
         mediaPlayer?.let { player ->
             try {
+                player.removeListener(mediaPlayerListener)
                 player.stop()
                 player.release()
             } catch (e: Exception) {
@@ -138,8 +166,14 @@ class MusicPlayerService : Service() {
     fun setVolume(volume: Float) {
         if (!ducked) {
             musicVolume = volume / 100f
-            mediaPlayer?.volume = musicVolume
+            setPlayerVolume(musicVolume)
         }
+    }
+
+    /** The only place that should assign [ExoPlayer.volume] - keeps [currentOutputVolume] in sync. */
+    private fun setPlayerVolume(volume: Float) {
+        mediaPlayer?.volume = volume
+        currentOutputVolume = volume
     }
 
     @SuppressLint("UnsafeOptInUsageError")
@@ -160,12 +194,12 @@ class MusicPlayerService : Service() {
 
                     AudioManager.AUDIOFOCUS_LOSS -> {
                         hasAudioFocus = false
-                        duckVolume(true)
+                        duckVolume()
                     }
 
                     AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                         hasAudioFocus = false
-                        duckVolume(true)
+                        duckVolume()
                     }
 
                     AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
@@ -189,16 +223,16 @@ class MusicPlayerService : Service() {
     private fun duckVolume(silence: Boolean = false) {
         val duckVolume = if (silence) 0f else getDuckingVolume()
         Timber.d("Music player: Ducking volume to $duckVolume")
-        mediaPlayer?.volume = duckVolume
+        setPlayerVolume(duckVolume)
         ducked = true
     }
 
     private fun unDuckVolume(animate: Boolean = true) {
-        if (mediaPlayer?.volume == musicVolume) return
+        if (currentOutputVolume == musicVolume) return
         if (animate) {
             animateUnDuckingVolume()
         } else {
-            mediaPlayer?.volume = musicVolume
+            setPlayerVolume(musicVolume)
         }
         ducked = false
     }
@@ -209,7 +243,7 @@ class MusicPlayerService : Service() {
     ) {
         Timber.d("Music player: Un-ducking volume")
         val delay = durationMs / steps
-        val currentVolume = mediaPlayer?.volume ?: 1f
+        val currentVolume = currentOutputVolume
         val increment = (musicVolume - currentVolume) / steps
         scope.launch {
             if (increment > 0) {
@@ -217,7 +251,7 @@ class MusicPlayerService : Service() {
                     val vol = currentVolume + (i * increment)
                     Timber.d("Music player: setting volume to $vol")
                     withContext(Dispatchers.Main) {
-                        mediaPlayer?.volume = vol
+                        setPlayerVolume(vol)
                     }
                     delay(delay)
                 }
