@@ -14,6 +14,7 @@ import com.msp1974.vacompanion.device.FunctionClasses
 import com.msp1974.vacompanion.device.UnsupportedFunctionsDevice
 import com.msp1974.vacompanion.settings.APPConfig
 import timber.log.Timber
+import kotlin.math.pow
 
 object AudioEnhancerSource {
     const val UNAVAILABLE = "Unavailable"
@@ -27,7 +28,7 @@ class MicrophoneInput (
 ) : AutoCloseable {
 
     private val sampleRateInHz: Int = VACAAudioFormat.SAMPLE_RATE_HZ
-    private val channelConfig: Int = VACAAudioFormat.CHANNELS
+    private val channelConfig: Int = VACAAudioFormat.CAPTURE_CHANNELS
     private val audioFormat: Int = VACAAudioFormat.ENCODING
     private val config: APPConfig = deviceManager.config
 
@@ -93,7 +94,13 @@ class MicrophoneInput (
     // route to it. See AudioInRouter for details.
     private val micController = AudioInRouter(context, deviceManager) { onPreferredMicrophoneChanged() }
 
-    private val bufferSize =
+    // Stereo capture feeds Fluence both DMICs so it can beamform; everything
+    // downstream still gets mono because readShort downmixes on the way out.
+    // Falls back to mono if the device refuses to open a stereo record. (House patch.)
+    private var activeChannelConfig = channelConfig
+    private val isStereoCapture get() = activeChannelConfig == android.media.AudioFormat.CHANNEL_IN_STEREO
+
+    private var bufferSize =
         AudioRecord.getMinBufferSize(sampleRateInHz, channelConfig, audioFormat)
 
     val isRecording
@@ -119,16 +126,38 @@ class MicrophoneInput (
 
         Timber.i(
             "Using microphone: ${preferred.device?.productName} ${AudioInRouter.getDeviceTypeName(preferred.device?.type ?: -1)}, AudioSource: ${VACAAudioFormat.getAudioSourceName(preferred.audioSource)}")
-        val record = AudioRecord(
-            preferred.audioSource,
-            sampleRateInHz,
-            channelConfig,
-            audioFormat,
-            bufferSize * 2
-        )
-        check(record.state == AudioRecord.STATE_INITIALIZED) {
-            "Failed to initialize AudioRecord"
+        // Try the requested config first, then mono. A device that won't open a
+        // stereo record must not take the satellite's microphone down with it.
+        val configs = if (channelConfig == android.media.AudioFormat.CHANNEL_IN_STEREO) {
+            listOf(channelConfig, VACAAudioFormat.CHANNEL_IN_CONFIG)
+        } else {
+            listOf(channelConfig)
         }
+        var record: AudioRecord? = null
+        for (cfg in configs) {
+            val size = AudioRecord.getMinBufferSize(sampleRateInHz, cfg, audioFormat)
+            if (size <= 0) {
+                Timber.w("Channel config $cfg unsupported at ${sampleRateInHz}Hz")
+                continue
+            }
+            val candidate = try {
+                AudioRecord(preferred.audioSource, sampleRateInHz, cfg, audioFormat, size * 2)
+            } catch (e: Exception) {
+                Timber.w("AudioRecord failed for channel config $cfg: ${e.message}")
+                continue
+            }
+            if (candidate.state != AudioRecord.STATE_INITIALIZED) {
+                candidate.release()
+                Timber.w("AudioRecord not initialised for channel config $cfg")
+                continue
+            }
+            activeChannelConfig = cfg
+            bufferSize = size
+            record = candidate
+            break
+        }
+        checkNotNull(record) { "Failed to initialize AudioRecord" }
+        Timber.d("Capturing ${if (isStereoCapture) "STEREO (downmixed to mono)" else "MONO"}")
         micController.applyPreferredDevice(record, preferred.device)
         setupAudioEffects(record, attachNs = !isBuiltIn)
 
@@ -170,20 +199,35 @@ class MicrophoneInput (
     }
 
     fun readShort(bufferSize: Int = VACAAudioFormat.DEFAULT_BUFFER_SIZE_IN_SHORTS, applyEnhancement: Boolean = true): ShortArray {
-        val audioBuffer = ShortArray(bufferSize)
+        // Callers ask for a count of MONO samples. On a stereo record that means
+        // reading twice as many interleaved samples and folding them back down,
+        // so the contract with every consumer is unchanged.
+        val stereo = isStereoCapture
+        val audioBuffer = ShortArray(if (stereo) bufferSize * 2 else bufferSize)
         // Snapshot the current record under the lock rather than null-checking then reading -
         // otherwise a concurrent recreateAudioRecord() swap could be observed as null right
         // after the check, throwing and permanently ending the caller's read loop. A mid-swap
         // read now just yields no audio for this frame, same as any other short read.
         val audioRecord = synchronized(audioRecordLock) { this.audioRecord } ?: return ShortArray(0)
-        val readCount = audioRecord.read(audioBuffer, 0, audioBuffer.size)
+        var readCount = audioRecord.read(audioBuffer, 0, audioBuffer.size)
+        if (stereo && readCount > 0) readCount -= readCount % 2   // whole frames only
         if (readCount > 0) {
-            val frame = audioBuffer.copyOfRange(0, readCount)
+            val frame = if (stereo) {
+                downmixToMono(audioBuffer, readCount)
+            } else {
+                audioBuffer.copyOfRange(0, readCount)
+            }
             if (applyEnhancement) {
-                // processFrame() internally no-ops on AGC/noise suppression when the
-                // device covers them in hardware - so it's always safe/cheap to route
-                // through here rather than tracking which sub-feature(s) are actually active.
+                // With the software enhancer off (see setupAudioEffects), mic_gain is a
+                // plain dB trim: -10..+10 dB, 0 = raw passthrough, nothing touches the
+                // samples. This is the path Eric's ear signed off on. (House patch.)
                 val micGain = if (isMicSuppressed()) -5 else config.micGain
+                if (micGain != 0) {
+                    val gain = 10.0.pow(micGain / 20.0).toFloat()
+                    for (i in frame.indices) {
+                        frame[i] = (frame[i] * gain).toInt().coerceIn(-32768, 32767).toShort()
+                    }
+                }
                 audioEnhancer.setMicGainDb(micGain.toFloat())
                 return audioEnhancer.processFrame(frame)
             }
@@ -265,10 +309,33 @@ class MicrophoneInput (
             }
         }
 
+        // SOFTWARE ENHANCER OFF IN THIS HOUSE (2026-07-28, kept through 0.14.0).
+        //
+        // Upstream enables its software AGC + spectral noise suppressor wherever
+        // the platform effects are missing. On the ThinkSmart View (LineageOS
+        // 15.1) neither platform effect attaches, so both ran - and the result was
+        // audibly worse than raw: distorted, with suppression artifacts, unable to
+        // hear Eric at normal speaking distance. Rejected on his ear, which is the
+        // acceptance test here. Leaving them off restores the raw capture path that
+        // was verified good on this hardware; mic_gain is a plain dB trim (readShort).
+        if (audioEnhancer.agcEnabled) agcSource = AudioEnhancerSource.UNAVAILABLE
+        if (audioEnhancer.noiseSuppressionEnabled) nsSource = AudioEnhancerSource.UNAVAILABLE
+        audioEnhancer.agcEnabled = false
+        audioEnhancer.noiseSuppressionEnabled = false
+
         audioEnhancer.reset()
         Timber.d(
-            "Audio enhancement - AGC: ${agcSource}, NS: ${nsSource}, AEC: ${aecSource}"
+            "Audio enhancement - AGC: ${agcSource}, NS: ${nsSource}, AEC: ${aecSource} (software enhancer off: house)"
         )
+    }
+
+    /** Average the interleaved pair down to one mono sample. */
+    private fun downmixToMono(interleaved: ShortArray, sampleCount: Int): ShortArray {
+        val out = ShortArray(sampleCount / 2)
+        for (i in out.indices) {
+            out[i] = ((interleaved[i * 2] + interleaved[i * 2 + 1]) / 2).toShort()
+        }
+        return out
     }
 
     override fun close() {

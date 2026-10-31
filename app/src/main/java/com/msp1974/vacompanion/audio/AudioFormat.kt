@@ -27,6 +27,18 @@ object VACAAudioFormat {
     /** Android AudioFormat channel config for mono input. */
     @JvmField val CHANNEL_IN_CONFIG = AudioFormat.CHANNEL_IN_MONO
 
+    /**
+     * Capture channel config (house patch 2026-07-28, kept through 0.14.0).
+     *
+     * STEREO, so the Qualcomm Fluence DSP is handed both DMICs and can actually
+     * beamform. With a mono client it runs single-mic no matter which snd_device
+     * the HAL routes - the `voice-rec-dmic-ef-fluence` path is necessary but not
+     * sufficient. MicrophoneInput downmixes to mono immediately after capture, so
+     * every consumer downstream still sees the same mono 16 kHz stream it always
+     * did, and falls back to mono capture if the device rejects stereo.
+     */
+    @JvmField val CAPTURE_CHANNELS = AudioFormat.CHANNEL_IN_STEREO
+
     const val DEFAULT_AUDIO_SOURCE = MediaRecorder.AudioSource.VOICE_RECOGNITION
     const val BLUETOOTH_AUDIO_SOURCE = MediaRecorder.AudioSource.VOICE_COMMUNICATION
     const val FALLBACK_AUDIO_SOURCE = MediaRecorder.AudioSource.MIC
