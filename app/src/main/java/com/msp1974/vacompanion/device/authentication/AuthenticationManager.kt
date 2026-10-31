@@ -93,6 +93,7 @@ class AuthenticationManager(
     }
 
     companion object {
+        private const val EXPIRY_MARGIN_MS = 5 * 60 * 1000L
         private const val MAX_INVALID_REQUEST_COUNT = 2
     }
 
@@ -133,6 +134,8 @@ class AuthenticationManager(
         return url.toString()
     }
 
-    fun isExpired() = (expiresIn() < 0)
+    // Refresh ahead of expiry so a token is never vended with (almost) no life left
+    // (house patch, kept from 1131638; the rest of that patch is upstream since 0.13.4)
+    fun isExpired() = (expiresIn() < EXPIRY_MARGIN_MS)
     fun expiresIn() = config.tokenExpiry.let { config.tokenExpiry - System.currentTimeMillis() }
 }
