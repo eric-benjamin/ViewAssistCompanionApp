@@ -133,6 +133,8 @@ class VacaUdpBroadcast(
         private const val RESTART_DELAY_MS = 5_000L
 
         const val DATA_SCORE = "score"
+        const val DATA_LEVEL = "level"       // house: mic dBFS over the wake phrase
+        const val DATA_DETECTIONS = "detections"  // house: what the master weighed, for tuning
         const val DATA_ID = "id"
         const val DATA_WINNER = "winner"
         const val DATA_IDS = "ids"
@@ -184,7 +186,8 @@ class VacaUdpBroadcast(
         addHandler(VacaBroadcastType.WAKE_DETECTION) { msg ->
             val id = msg.data[DATA_ID]?.jsonPrimitive?.contentOrNull ?: return@addHandler
             val score = msg.data[DATA_SCORE]?.jsonPrimitive?.floatOrNull ?: 0f
-            if (isMaster) collectDetection(msg.area.orEmpty(), Detection(id, msg.senderId, score))
+            val level = msg.data[DATA_LEVEL]?.jsonPrimitive?.floatOrNull
+            if (isMaster) collectDetection(msg.area.orEmpty(), Detection(id, msg.senderId, score, level))
         }
         addHandler(VacaBroadcastType.WAKE_DECISION) { msg ->
             val winner = msg.data[DATA_WINNER]?.jsonPrimitive?.contentOrNull.orEmpty()
@@ -204,7 +207,7 @@ class VacaUdpBroadcast(
         scope.launch { listenLoop() }
     }
 
-    private class Detection(val id: String, val sender: String, val score: Float)
+    private class Detection(val id: String, val sender: String, val score: Float, val level: Float? = null)
     private class ActivePipeline(val area: String, val since: Long)
 
     @Volatile private var masterId: String? = null
@@ -234,7 +237,7 @@ class VacaUdpBroadcast(
      * Skipped ([contest] false, or no area set) the device just ducks and wins. The same happens
      * if no master is known yet or it doesn't answer, so a dead master never silences a device.
      */
-    suspend fun arbitrateWakeWord(score: Float, contest: Boolean = true): Boolean {
+    suspend fun arbitrateWakeWord(score: Float, contest: Boolean = true, level: Float? = null): Boolean {
         val area = config.area
         if (!contest || area.isEmpty() || masterId == null) {
             sendDuck()
@@ -246,11 +249,12 @@ class VacaUdpBroadcast(
         val decision = CompletableDeferred<String>()
         awaiting[id] = decision
         if (isMaster) {
-            collectDetection(area, Detection(id, me, score))
+            collectDetection(area, Detection(id, me, score, level))
         } else {
             send(VacaBroadcastType.WAKE_DETECTION, buildJsonObject {
                 put(DATA_ID, JsonPrimitive(id))
                 put(DATA_SCORE, JsonPrimitive(score))
+                level?.let { put(DATA_LEVEL, JsonPrimitive(it)) }
             })
         }
         val winner = withTimeoutOrNull(DECISION_TIMEOUT_MS.milliseconds) { decision.await() }
@@ -263,7 +267,7 @@ class VacaUdpBroadcast(
             return true
         }
         val won = winner == id
-        Timber.i("VacaUdpBroadcast: wake word arbitration ${if (won) "won" else "lost"} (score=$score)")
+        Timber.i("VacaUdpBroadcast: wake word arbitration ${if (won) "won" else "lost"} (score=$score level=$level)")
         if (won) sendDuck()
         return won
     }
@@ -298,16 +302,31 @@ class VacaUdpBroadcast(
         val now = SystemClock.elapsedRealtime()
         activePipelines.entries.removeIf { now - it.value.since > ACTIVE_PIPELINE_TIMEOUT_MS }
 
-        val best = detections.maxWithOrNull(compareBy<Detection> { it.score }.thenByDescending { it.sender }) ?: return
+        // HOUSE (2026-10-31): the louder microphone wins, the score only breaks a tie or
+        // stands in for a device that sent no level. In one open space every score is at
+        // the ceiling; the level over the wake phrase is the distance (and mic_gain the knob).
+        val best = detections.maxWithOrNull(
+            compareBy<Detection> { it.level ?: -200f }.thenBy { it.score }.thenByDescending { it.sender }
+        ) ?: return
         val busy = activePipelines.any { (sender, p) -> sender != best.sender && p.area.equals(areaKey, ignoreCase = true) }
         val winner = if (busy) "" else best.id
         if (!busy) activePipelines[best.sender] = ActivePipeline(areaKey, now)
-        Timber.i("VacaUdpBroadcast: decided ${if (busy) "no winner (pipeline active)" else "winner ${best.sender}"} from ${detections.size} detection(s)")
+        Timber.i("VacaUdpBroadcast: decided ${if (busy) "no winner (pipeline active)" else "winner ${best.sender}"} from ${detections.size} detection(s): " +
+            detections.joinToString { "${it.sender} level=${it.level} score=${it.score}" })
 
         val ids = detections.map { it.id }
         send(VacaBroadcastType.WAKE_DECISION, buildJsonObject {
             put(DATA_WINNER, JsonPrimitive(winner))
             put(DATA_IDS, buildJsonArray { ids.forEach { add(JsonPrimitive(it)) } })
+            put(DATA_DETECTIONS, buildJsonArray {
+                detections.forEach { d ->
+                    add(buildJsonObject {
+                        put(DATA_ID, JsonPrimitive(d.id))
+                        put(DATA_SCORE, JsonPrimitive(d.score))
+                        d.level?.let { put(DATA_LEVEL, JsonPrimitive(it)) }
+                    })
+                }
+            })
         })
         completeAwaiting(winner, ids) // our own broadcasts don't loop back to us
     }

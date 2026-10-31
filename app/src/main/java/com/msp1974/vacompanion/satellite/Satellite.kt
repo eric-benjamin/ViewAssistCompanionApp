@@ -17,6 +17,7 @@ import com.msp1974.vacompanion.audio.MicrophoneInput
 import com.msp1974.vacompanion.broadcasts.BroadcastSender
 import com.msp1974.vacompanion.broadcasts.VacaUdpBroadcast
 import com.msp1974.vacompanion.data.AvailableAlarms
+import com.msp1974.vacompanion.audio.MicLevel
 import com.msp1974.vacompanion.data.AvailableWakeSounds
 import com.msp1974.vacompanion.device.camera.CameraAvailability
 import com.msp1974.vacompanion.device.camera.MotionDetector
@@ -533,6 +534,7 @@ abstract class Satellite(var context: Context, val deviceManager: DeviceManager,
                 VacaUdpBroadcast.instance?.arbitrateWakeWord(
                     detection.score,
                     contest = detection.wakeWordId != "manual_wake",
+                    level = MicLevel.recentDbfs(),  // house: the louder microphone wins
                 ) ?: true
             } finally {
                 arbitratingWakeWord = false

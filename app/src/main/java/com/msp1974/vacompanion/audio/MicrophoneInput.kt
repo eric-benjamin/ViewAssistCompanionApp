@@ -234,6 +234,7 @@ class MicrophoneInput (
                 // Read-only tap for the dashboard meter: this is exactly what the
                 // recognizer is about to receive. See gideon/GideonVoiceMeter.
                 GideonVoiceMeter.feedMic(out, out.size, sampleRateInHz)
+                MicLevel.feed(out, out.size, sampleRateInHz)  // wake word arbitration by loudness (house)
                 return out
             }
             return frame
