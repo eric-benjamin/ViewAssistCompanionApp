@@ -30,6 +30,7 @@
 
     <!--Allow wifi toggling on Android 9 and below-->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" /> <!-- house: VACA broadcasts need the multicast lock -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
 
     <!--Allow to disable key guard-->

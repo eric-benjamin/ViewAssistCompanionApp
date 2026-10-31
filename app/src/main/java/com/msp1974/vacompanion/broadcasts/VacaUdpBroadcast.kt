@@ -3,6 +3,7 @@
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.net.wifi.WifiManager
 import com.msp1974.vacompanion.device.DeviceManager
 import com.msp1974.vacompanion.utils.Event
 import com.msp1974.vacompanion.utils.EventListener
@@ -172,12 +173,29 @@ class VacaUdpBroadcast(
 
     @Volatile private var started = false
 
+    // HOUSE (2026-10-31): Android's Wi-Fi driver filters incoming broadcast/multicast frames
+    // unless some app holds a multicast lock. The kitchen tablet heard every broadcast only
+    // because its AirPlay receiver holds one; the TSV held none and silently dropped the
+    // master's heartbeats and decisions (it kept claiming master and, missing the decision,
+    // started its own pipeline: both tablets answered). Held for as long as the listener runs.
+    private var multicastLock: WifiManager.MulticastLock? = null
+
     fun start() {
         // BackgroundTaskController.start() can run again on a server restart.
         if (started) return
         started = true
         instance = this
         config.eventBroadcaster.addListener(this)
+        try {
+            val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            multicastLock = wifi?.createMulticastLock("vaca-broadcast")?.apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+            Timber.i("VacaUdpBroadcast: multicast lock ${if (multicastLock?.isHeld == true) "held" else "NOT held"}")
+        } catch (e: Exception) {
+            Timber.w("VacaUdpBroadcast: multicast lock unavailable: ${e.message}")
+        }
 
         addHandler(VacaBroadcastType.MASTER_CLAIM) { msg -> onMasterSeen(msg.senderId) }
         addHandler(VacaBroadcastType.MASTER_HEARTBEAT) { msg -> onMasterSeen(msg.senderId) }
@@ -371,6 +389,8 @@ class VacaUdpBroadcast(
     fun shutdown() {
         instance = null
         config.eventBroadcaster.removeListener(this)
+        runCatching { if (multicastLock?.isHeld == true) multicastLock?.release() }
+        multicastLock = null
         handlers.clear()
         receiveSocket?.close()
         sendSocket?.close()
