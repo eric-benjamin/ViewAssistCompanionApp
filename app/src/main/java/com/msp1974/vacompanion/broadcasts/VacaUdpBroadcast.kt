@@ -231,6 +231,10 @@ class VacaUdpBroadcast(
     @Volatile private var masterId: String? = null
     @Volatile private var lastMasterSeen = 0L
     private val isMaster get() = masterId == config.uuid
+    // HOUSE (2026-10-31): a preferred master, pushed by HA. It claims at once and never stands
+    // down; everyone else adopts it over any lower id. Election stays the fallback when it is away.
+    private val preferredMaster get() = config.arbitrationMaster
+    private val iAmPreferred get() = preferredMaster.isNotEmpty() && preferredMaster == config.uuid
 
     // Master only: detections gathered per (lowercase) area while a decision window is open.
     private val pending = HashMap<String, MutableList<Detection>>()
@@ -279,10 +283,13 @@ class VacaUdpBroadcast(
         awaiting.remove(id)
 
         if (winner == null) {
-            Timber.w("VacaUdpBroadcast: no decision from master $masterId, starting anyway")
+            // HOUSE (2026-10-31): upstream starts anyway here, which is how two tablets end up
+            // answering ("Kitchen answered, few seconds later the TSV"). One voice beats two:
+            // a device that asked and got no answer stays silent; the master (or the next
+            // election) carries the wake. A master never lands here, it decides locally.
+            Timber.w("VacaUdpBroadcast: no decision from master $masterId, staying silent")
             if (!isMaster) lastMasterSeen = 0L // forces a new election
-            sendDuck()
-            return true
+            return false
         }
         val won = winner == id
         Timber.i("VacaUdpBroadcast: wake word arbitration ${if (won) "won" else "lost"} (score=$score level=$level)")
@@ -351,8 +358,19 @@ class VacaUdpBroadcast(
 
     /** A claim or heartbeat arrived. The lowest id wins if two devices both think they are master. */
     private fun onMasterSeen(sender: String) {
+        if (iAmPreferred) {
+            // Nobody outranks the preferred master; a stray claim is answered with ours.
+            if (!isMaster) {
+                masterId = config.uuid
+                lastMasterSeen = SystemClock.elapsedRealtime()
+                send(VacaBroadcastType.MASTER_CLAIM)
+            }
+            return
+        }
         val current = masterId
-        if (current == null || current == sender || sender < current) {
+        val preferred = preferredMaster.isNotEmpty() && sender == preferredMaster
+        val currentIsPreferred = current != null && preferredMaster.isNotEmpty() && current == preferredMaster
+        if (current == null || current == sender || preferred || (!currentIsPreferred && sender < current)) {
             if (current == config.uuid && sender != current) Timber.i("VacaUdpBroadcast: $sender is master, standing down")
             masterId = sender
             lastMasterSeen = SystemClock.elapsedRealtime()
@@ -365,6 +383,13 @@ class VacaUdpBroadcast(
         var lastHeartbeat = 0L
         while (scope.isActive) {
             val now = SystemClock.elapsedRealtime()
+            if (iAmPreferred && !isMaster) {
+                Timber.i("VacaUdpBroadcast: preferred master, claiming")
+                masterId = config.uuid
+                lastMasterSeen = now
+                send(VacaBroadcastType.MASTER_CLAIM)
+                lastHeartbeat = now
+            }
             if (isMaster) {
                 if (now - lastHeartbeat >= HEARTBEAT_INTERVAL_MS) {
                     send(VacaBroadcastType.MASTER_HEARTBEAT)
