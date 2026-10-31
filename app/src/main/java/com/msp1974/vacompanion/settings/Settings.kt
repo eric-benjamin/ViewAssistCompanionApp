@@ -204,6 +204,12 @@ class APPConfig @Inject constructor(val context: Context) {
         get() = this.sharedPrefs.getString("area", "") ?: ""
         set(value) = this.sharedPrefs.edit { putString("area", value.trim()) }
 
+    // dB added to this device's microphone level in the wake word vote (house build 2026-10-31,
+    // number "Arbitration bias" in HA); mic_gain stays the audio knob. Persisted like `area`.
+    var arbitrationBias: Float
+        get() = this.sharedPrefs.getFloat("arbitration_bias", 0f)
+        set(value) = this.sharedPrefs.edit { putFloat("arbitration_bias", value) }
+
     var isMuted: Boolean by Delegates.observable(DEFAULT_MUTE) { property, oldValue, newValue ->
         onValueChangedListener(property, oldValue, newValue)
     }
@@ -494,6 +500,7 @@ class APPConfig @Inject constructor(val context: Context) {
         settings["ducking_volume"]?.jsonPrimitive?.floatOrNull?.let { duckingVolume = it.toInt() }
         settings["area"]?.jsonPrimitive?.contentOrNull?.let { area = it }
         settings["mic_gain"]?.jsonPrimitive?.intOrNull?.let { micGain = it }
+        settings["arbitration_bias"]?.jsonPrimitive?.floatOrNull?.let { arbitrationBias = it }
         settings["mute"]?.jsonPrimitive?.booleanOrNull?.let { isMuted = it }
         settings["screen_brightness"]?.jsonPrimitive?.floatOrNull?.let { screenBrightness = it / 100 }
         settings["screen_auto_brightness"]?.jsonPrimitive?.booleanOrNull?.let { screenAutoBrightness = it }

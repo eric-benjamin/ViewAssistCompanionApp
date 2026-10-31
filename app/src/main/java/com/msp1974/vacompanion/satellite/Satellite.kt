@@ -534,7 +534,7 @@ abstract class Satellite(var context: Context, val deviceManager: DeviceManager,
                 VacaUdpBroadcast.instance?.arbitrateWakeWord(
                     detection.score,
                     contest = detection.wakeWordId != "manual_wake",
-                    level = MicLevel.recentDbfs(),  // house: the louder microphone wins
+                    level = MicLevel.recentDbfs() + config.arbitrationBias,  // house: the louder microphone wins, bias closes the mic gap
                 ) ?: true
             } finally {
                 arbitratingWakeWord = false
