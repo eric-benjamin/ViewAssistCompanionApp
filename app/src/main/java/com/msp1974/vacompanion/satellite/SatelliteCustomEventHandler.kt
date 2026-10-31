@@ -98,9 +98,19 @@ class SatelliteCustomEventHandler(
             "alarmVolume" -> {
                 volumeManager.setVolume(AudioManager.STREAM_ALARM, event.newValue as Int)
             }
-            "wakeWord", "wakeWordSound", "wakeWordThreshold", "wakeWordEngine" -> {
+            "wakeWord", "wakeWordThreshold", "wakeWordEngine" -> {
                 scope.launch {
                     satellite.restartWakeWordDetection()
+                }
+            }
+            "wakeWordSound" -> {
+                // Only the cue changed. Restarting the wake word engine for it tore
+                // the detector down for a model reload, and a setting that arrives
+                // while a pipeline is live (Home Assistant rolling the cue at the end
+                // of one turn, a continuation opening 30 ms later) left the follow-up
+                // without its engine. (House patch, kept from 1b95f25.)
+                scope.launch {
+                    satellite.reloadWakeWordSound()
                 }
             }
             "recognitionError" -> {

@@ -947,22 +947,36 @@ abstract class Satellite(var context: Context, val deviceManager: DeviceManager,
     private suspend fun warmUpAudioResources() {
         withContext(Dispatchers.Main) {
             mediaManager.soundPlayer.preload("asset:///other/error.mp3".toUri())
+            preloadWakeWordSound()
+        }
+    }
 
-            if (config.wakeWordSound != "none") {
-                val newUri = resolveWakeSoundUri(config.wakeWordSound)
+    /**
+     * Swap the preloaded wake cue for whatever the settings now name. Safe to
+     * call while the wake word engine and a pipeline are running: it touches the
+     * sound player only, never the microphone. (House patch, kept from 1b95f25.)
+     */
+    suspend fun reloadWakeWordSound() {
+        withContext(Dispatchers.Main) {
+            preloadWakeWordSound()
+        }
+    }
 
-                if (newUri != null && newUri != currentWakeWordSoundUri) {
-                    currentWakeWordSoundUri?.let { oldUri ->
-                        mediaManager.soundPlayer.unload(oldUri)
-                    }
-                    mediaManager.soundPlayer.preload(newUri)
-                    currentWakeWordSoundUri = newUri
-                }
-            } else {
+    private suspend fun preloadWakeWordSound() {
+        if (config.wakeWordSound != "none") {
+            val newUri = resolveWakeSoundUri(config.wakeWordSound)
+
+            if (newUri != null && newUri != currentWakeWordSoundUri) {
                 currentWakeWordSoundUri?.let { oldUri ->
                     mediaManager.soundPlayer.unload(oldUri)
-                    currentWakeWordSoundUri = null
                 }
+                mediaManager.soundPlayer.preload(newUri)
+                currentWakeWordSoundUri = newUri
+            }
+        } else {
+            currentWakeWordSoundUri?.let { oldUri ->
+                mediaManager.soundPlayer.unload(oldUri)
+                currentWakeWordSoundUri = null
             }
         }
     }
