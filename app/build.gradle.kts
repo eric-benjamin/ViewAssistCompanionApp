@@ -101,6 +101,8 @@ androidComponents {
 
 
 dependencies {
+    // ML Kit face detection awaits Play Services Tasks; this used to arrive transitively with Firebase (stripped, house build)
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.11.0")
 
     implementation(project(":microfeatures"))
     implementation(project(":sendspin"))

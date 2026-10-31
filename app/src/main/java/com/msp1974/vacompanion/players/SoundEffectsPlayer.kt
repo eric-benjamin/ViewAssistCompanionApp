@@ -50,9 +50,10 @@ class SoundEffectsPlayer(val context: Context, val config: APPConfig) : EventLis
                 uriPlayers.values.forEach { it.setPreferredAudioDevice(device) }
                 activeAdhocPlayer?.setPreferredAudioDevice(device)
             }
+        }
+    }
+
     private val uriDurations = ConcurrentHashMap<Uri, Long>()
-    private val _state = MutableStateFlow(Player.STATE_IDLE)
-    val state: StateFlow<Int> = _state
 
     /**
      * How long the last sample of a sound needs to get from the decoder to the
