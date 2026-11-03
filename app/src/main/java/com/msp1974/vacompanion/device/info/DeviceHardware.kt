@@ -94,7 +94,13 @@ class DeviceHardware(
         val batteryStatus = context.registerReceiver(null, intentFilter)
         val hasBattery = batteryStatus?.getBooleanExtra(BatteryManager.EXTRA_PRESENT, false)
         val batteryVoltage = batteryStatus?.getIntExtra(BatteryManager.EXTRA_VOLTAGE, 0)
-        return hasBattery == true && batteryVoltage != 0 && Helpers.getDeviceName().toString() != "Lenovo StarView"
+        // The Lenovo ThinkSmart View has no battery but reports one (present, ~3.9 V, level pinned,
+        // a negative charge counter) on stock and on LineageOS alike. Match it on Build.MODEL /
+        // Build.DEVICE: Helpers.getDeviceName() returns "Lenovo StarView (starfire)" for it (model
+        // plus device whenever the model starts with the manufacturer), so the old comparison
+        // against the bare model name never matched and HA got a 0 % battery entity.
+        val knownNoBattery = Build.MODEL == "Lenovo StarView" || Build.DEVICE == "starfire"
+        return hasBattery == true && batteryVoltage != 0 && !knownNoBattery
     }
 
     private fun hasFrontCamera(): Boolean {
