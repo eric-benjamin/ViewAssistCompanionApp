@@ -147,16 +147,21 @@ abstract class SatelliteAudioPipeline(
     }
 
     fun watchDogTimer() {
+        // Per-stage limits only (hasExceededTimeInStage). There used to be a blanket
+        // withTimeout(20.seconds) around this loop as well: an assistant whose answer takes
+        // longer than that (tool calls; 24 s measured 2026-11-20) had its pipeline stopped
+        // here while HA was still working, which also cleared the continue flag — the answer
+        // then played through a TTS-only pipeline and the follow-up question was never
+        // listened for. AWAITING_RESPONSE is deliberately unlimited in the stage table; HA
+        // ends the run itself, which brings this pipeline to ENDED. (House patch.)
         scope.launch {
             try {
-                withTimeout(20.seconds) {
-                    while (pipelineStage != PipelineStage.STREAMING_TTS) {
-                        if (hasExceededTimeInStage()) {
-                            stop(PipelineEndReason.TIMED_OUT)
-                            break
-                        }
-                        delay(200.milliseconds)
+                while (pipelineStage != PipelineStage.STREAMING_TTS && pipelineStage != PipelineStage.ENDED) {
+                    if (hasExceededTimeInStage()) {
+                        stop(PipelineEndReason.TIMED_OUT)
+                        break
                     }
+                    delay(200.milliseconds)
                 }
             } catch (_: Exception) {
                 stop(PipelineEndReason.TIMED_OUT)
